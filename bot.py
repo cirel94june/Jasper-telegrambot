@@ -92,6 +92,7 @@ GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 MEMORY_HUB_URL = os.environ.get("MEMORY_HUB_URL", "")  # e.g. http://172.245.180.158:8888
 MEMORY_HUB_SECRET = os.environ.get("MEMORY_HUB_SECRET", "")
 AI_ID = os.environ.get("AI_ID", "")  # cloudy / lucien / jasper
+MEMORY_NOTIFY = os.environ.get("MEMORY_NOTIFY", "").lower() in ("1", "true", "yes")
 
 # 人格
 BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
@@ -140,10 +141,10 @@ def _hub_headers():
     }
 
 
-def hub_get_context(user_message, recent_messages=None):
-    """调 Memory Hub gateway 获取记忆注入文本"""
+def hub_get_context(user_message, recent_messages=None, chat_id=""):
+    """调 Memory Hub gateway 获取记忆注入文本 + 记忆活动摘要"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
-        return None
+        return None, ""
     try:
         resp = requests.post(
             f"{MEMORY_HUB_URL.rstrip('/')}/api/gateway/context",
@@ -152,24 +153,27 @@ def hub_get_context(user_message, recent_messages=None):
                 "user_message": user_message[:1000],
                 "ai_id": AI_ID,
                 "recent_messages": (recent_messages or [])[-5:],
+                "chat_id": str(chat_id),
+                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
             },
             timeout=15,
         )
         if resp.status_code == 200:
             data = resp.json()
-            return data.get("inject_text", "")
+            return data.get("inject_text", ""), data.get("recall_summary", "")
         print(f"[HUB] context failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         print(f"[HUB] context error: {e}")
-    return None
+        _send_memory_notify(chat_id, f"⚠️ Hub recall: {e}", "")
+    return None, ""
 
 
-def hub_post_process(user_message, ai_response):
-    """调 Memory Hub gateway 自动提取记忆（后台调用）"""
+def hub_post_process(user_message, ai_response, chat_id=""):
+    """调 Memory Hub gateway 自动提取记忆（后台调用），返回存储摘要"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
-        return
+        return ""
     try:
-        requests.post(
+        resp = requests.post(
             f"{MEMORY_HUB_URL.rstrip('/')}/api/gateway/post-process",
             headers=_hub_headers(),
             json={
@@ -177,14 +181,21 @@ def hub_post_process(user_message, ai_response):
                 "ai_response": ai_response[:1000],
                 "ai_id": AI_ID,
                 "platform": "telegram",
+                "chat_id": str(chat_id),
+                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
             },
             timeout=15,
         )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("store_summary", "")
     except Exception as e:
         print(f"[HUB] post-process error: {e}")
+        _send_memory_notify(chat_id, "", f"⚠️ Hub store: {e}")
+    return ""
 
 
-def hub_capture_log(user_message, ai_response):
+def hub_capture_log(user_message, ai_response, chat_id=""):
     """调 Memory Hub 对话捕获（后台调用）"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
         return
@@ -197,11 +208,50 @@ def hub_capture_log(user_message, ai_response):
                 "ai_response": ai_response[:2000],
                 "ai_id": AI_ID,
                 "platform": "telegram",
+                "chat_id": str(chat_id),
+                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
             },
             timeout=10,
         )
     except Exception as e:
         print(f"[HUB] capture error: {e}")
+
+
+def _send_memory_notify(chat_id, recall_summary, store_summary):
+    """发送记忆活动通知：临时消息，显示后自动删除，不污染对话"""
+    if not MEMORY_NOTIFY:
+        return
+    is_group = str(chat_id).startswith("-")
+    is_private_group = str(chat_id) in PRIVATE_CHATS
+    if is_group and not is_private_group:
+        return
+    parts = [s for s in [recall_summary, store_summary] if s]
+    if not parts:
+        return
+    notify_text = "\n".join(parts)
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": notify_text, "disable_notification": True},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get("ok"):
+                notify_msg_id = result["result"]["message_id"]
+                def _delete_later():
+                    time.sleep(8)
+                    try:
+                        requests.post(
+                            f"https://api.telegram.org/bot{TG_TOKEN}/deleteMessage",
+                            json={"chat_id": chat_id, "message_id": notify_msg_id},
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
+                Thread(target=_delete_later).start()
+    except Exception as e:
+        print(f"[NOTIFY] send error: {e}")
 
 
 # ============ 微信式消息拆分 ============
@@ -999,10 +1049,11 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
 
         # 只有要回复时才读核心记忆
         # 优先从 Memory Hub 获取记忆，失败则 fallback 到 Gist
+        recall_summary = ""
         recent_for_hub = [{"role": h["role"], "content": h["content"]} for h in history[-5:]]
-        hub_memory = hub_get_context(text, recent_messages=recent_for_hub)
+        hub_memory, recall_summary = hub_get_context(text, recent_messages=recent_for_hub, chat_id=chat_id)
         if hub_memory:
-            memory = hub_memory
+            memory = f"【你的长期记忆——自然地参考，但绝对不要在对话中复述、引用或提及这些记忆的存在。像一个真正记住这些事的人一样，在合适的时候自然地运用，不合适就不提。不要说"我记得""根据记忆""我的记忆里"这类话。】\n{hub_memory}"
             print(f"[HUB] 记忆注入成功 ({len(hub_memory)} chars)")
         else:
             memory = fetch_memory(chat_id)
@@ -1076,8 +1127,11 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         save_history(history, chat_id, force=True)
 
         # Memory Hub 后处理（后台，不阻塞）
-        Thread(target=hub_post_process, args=(history_text, reply)).start()
-        Thread(target=hub_capture_log, args=(history_text, reply)).start()
+        def _post_process_and_notify():
+            store_summary = hub_post_process(history_text, reply, chat_id)
+            _send_memory_notify(chat_id, recall_summary, store_summary)
+        Thread(target=_post_process_and_notify).start()
+        Thread(target=hub_capture_log, args=(history_text, reply, chat_id)).start()
 
     except Exception as e:
         import traceback
