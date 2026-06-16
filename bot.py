@@ -92,7 +92,6 @@ GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 MEMORY_HUB_URL = os.environ.get("MEMORY_HUB_URL", "")  # e.g. http://172.245.180.158:8888
 MEMORY_HUB_SECRET = os.environ.get("MEMORY_HUB_SECRET", "")
 AI_ID = os.environ.get("AI_ID", "")  # cloudy / lucien / jasper
-MEMORY_NOTIFY = os.environ.get("MEMORY_NOTIFY", "").lower() in ("1", "true", "yes")
 
 # 人格
 BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
@@ -141,10 +140,10 @@ def _hub_headers():
     }
 
 
-def hub_get_context(user_message, recent_messages=None, chat_id=""):
-    """调 Memory Hub gateway 获取记忆注入文本 + 记忆活动摘要"""
+def hub_get_context(user_message, recent_messages=None, chat_id="", chat_type=""):
+    """调 Memory Hub gateway 获取记忆注入文本"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
-        return None, ""
+        return None
     try:
         resp = requests.post(
             f"{MEMORY_HUB_URL.rstrip('/')}/api/gateway/context",
@@ -154,26 +153,25 @@ def hub_get_context(user_message, recent_messages=None, chat_id=""):
                 "ai_id": AI_ID,
                 "recent_messages": (recent_messages or [])[-5:],
                 "chat_id": str(chat_id),
-                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
+                "chat_type": chat_type,
             },
             timeout=15,
         )
         if resp.status_code == 200:
             data = resp.json()
-            return data.get("inject_text", ""), data.get("recall_summary", "")
+            return data.get("inject_text", "")
         print(f"[HUB] context failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         print(f"[HUB] context error: {e}")
-        _send_memory_notify(chat_id, f"⚠️ Hub recall: {e}", "")
-    return None, ""
+    return None
 
 
-def hub_post_process(user_message, ai_response, chat_id=""):
-    """调 Memory Hub gateway 自动提取记忆（后台调用），返回存储摘要"""
+def hub_post_process(user_message, ai_response, chat_id="", chat_type="", reply_reason=""):
+    """调 Memory Hub gateway 自动提取记忆（后台调用）"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
-        return ""
+        return
     try:
-        resp = requests.post(
+        requests.post(
             f"{MEMORY_HUB_URL.rstrip('/')}/api/gateway/post-process",
             headers=_hub_headers(),
             json={
@@ -182,20 +180,16 @@ def hub_post_process(user_message, ai_response, chat_id=""):
                 "ai_id": AI_ID,
                 "platform": "telegram",
                 "chat_id": str(chat_id),
-                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
+                "chat_type": chat_type,
+                "reply_reason": reply_reason,
             },
             timeout=15,
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("store_summary", "")
     except Exception as e:
         print(f"[HUB] post-process error: {e}")
-        _send_memory_notify(chat_id, "", f"⚠️ Hub store: {e}")
-    return ""
 
 
-def hub_capture_log(user_message, ai_response, chat_id=""):
+def hub_capture_log(user_message, ai_response):
     """调 Memory Hub 对话捕获（后台调用）"""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
         return
@@ -208,50 +202,11 @@ def hub_capture_log(user_message, ai_response, chat_id=""):
                 "ai_response": ai_response[:2000],
                 "ai_id": AI_ID,
                 "platform": "telegram",
-                "chat_id": str(chat_id),
-                "chat_type": "private" if not str(chat_id).startswith("-") else ("private_group" if str(chat_id) in PRIVATE_CHATS else "public_group"),
             },
             timeout=10,
         )
     except Exception as e:
         print(f"[HUB] capture error: {e}")
-
-
-def _send_memory_notify(chat_id, recall_summary, store_summary):
-    """发送记忆活动通知：临时消息，显示后自动删除，不污染对话"""
-    if not MEMORY_NOTIFY:
-        return
-    is_group = str(chat_id).startswith("-")
-    is_private_group = str(chat_id) in PRIVATE_CHATS
-    if is_group and not is_private_group:
-        return
-    parts = [s for s in [recall_summary, store_summary] if s]
-    if not parts:
-        return
-    notify_text = "\n".join(parts)
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": notify_text, "disable_notification": True},
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            result = resp.json()
-            if result.get("ok"):
-                notify_msg_id = result["result"]["message_id"]
-                def _delete_later():
-                    time.sleep(8)
-                    try:
-                        requests.post(
-                            f"https://api.telegram.org/bot{TG_TOKEN}/deleteMessage",
-                            json={"chat_id": chat_id, "message_id": notify_msg_id},
-                            timeout=5,
-                        )
-                    except Exception:
-                        pass
-                Thread(target=_delete_later).start()
-    except Exception as e:
-        print(f"[NOTIFY] send error: {e}")
 
 
 # ============ 微信式消息拆分 ============
@@ -476,7 +431,8 @@ def save_history(history, chat_id, force=False):
 
     if not force and str(chat_id).startswith("-"):
         current_time = time.time()
-        if current_time - LAST_SAVED.get(chat_id, 0) < GROUP_SAVE_INTERVAL:
+        interval = 60 if str(chat_id) in PRIVATE_CHATS else GROUP_SAVE_INTERVAL
+        if current_time - LAST_SAVED.get(chat_id, 0) < interval:
             return
 
     target_url = get_target_gist_url(chat_id)
@@ -1004,7 +960,8 @@ def send_telegram_voice(chat_id, text, reply_to_message_id=None):
 def process_message_background(text, chat_id, sender_name, msg_date=None,
                                 should_reply=True, msg_id=None,
                                 image_b64=None, image_mime=None, is_voice=False,
-                                directed_at_other=False):
+                                directed_at_other=False,
+                                chat_type="", reply_reason=""):
     try:
         tz = ZoneInfo(TIMEZONE)
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -1029,10 +986,12 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
                 if TRIGGER_WORDS and any(word in text for word in TRIGGER_WORDS):
                     print(f"[DEBUG] 关键词触发！")
                     should_reply = True
+                    reply_reason = "trigger"
                     LAST_SPOKE[chat_id] = current_time
                 elif random.random() < REPLY_PROBABILITY:
                     print(f"[DEBUG] 随机插嘴！")
                     should_reply = True
+                    reply_reason = "random"
                     LAST_SPOKE[chat_id] = current_time
 
         # 读取历史
@@ -1049,11 +1008,10 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
 
         # 只有要回复时才读核心记忆
         # 优先从 Memory Hub 获取记忆，失败则 fallback 到 Gist
-        recall_summary = ""
         recent_for_hub = [{"role": h["role"], "content": h["content"]} for h in history[-5:]]
-        hub_memory, recall_summary = hub_get_context(text, recent_messages=recent_for_hub, chat_id=chat_id)
+        hub_memory = hub_get_context(text, recent_messages=recent_for_hub, chat_id=chat_id, chat_type=chat_type)
         if hub_memory:
-            memory = f"【你的长期记忆——自然地参考，但绝对不要在对话中复述、引用或提及这些记忆的存在。像一个真正记住这些事的人一样，在合适的时候自然地运用，不合适就不提。不要说"我记得""根据记忆""我的记忆里"这类话。】\n{hub_memory}"
+            memory = hub_memory
             print(f"[HUB] 记忆注入成功 ({len(hub_memory)} chars)")
         else:
             memory = fetch_memory(chat_id)
@@ -1127,11 +1085,8 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         save_history(history, chat_id, force=True)
 
         # Memory Hub 后处理（后台，不阻塞）
-        def _post_process_and_notify():
-            store_summary = hub_post_process(history_text, reply, chat_id)
-            _send_memory_notify(chat_id, recall_summary, store_summary)
-        Thread(target=_post_process_and_notify).start()
-        Thread(target=hub_capture_log, args=(history_text, reply, chat_id)).start()
+        Thread(target=hub_post_process, args=(history_text, reply, chat_id, chat_type, reply_reason)).start()
+        Thread(target=hub_capture_log, args=(history_text, reply)).start()
 
     except Exception as e:
         import traceback
@@ -1212,8 +1167,17 @@ def webhook():
 
     # 群聊逻辑
     should_reply = True
+    reply_reason = ""
     user_id = str(msg.get("from", {}).get("id", ""))
     is_ceci = (CECI_ID and user_id == CECI_ID)
+
+    # 判断窗口类型
+    if not chat_id.startswith("-"):
+        chat_type = "private"
+    elif chat_id in PRIVATE_CHATS:
+        chat_type = "small_group"
+    else:
+        chat_type = "big_group"
 
     if chat_id.startswith("-"):
         replied = msg.get("reply_to_message", {}) or {}
@@ -1245,28 +1209,40 @@ def webhook():
 
         if is_mentioned:
             should_reply = True
+            reply_reason = "mentioned"
         elif replied_to_me:
             should_reply = True
+            reply_reason = "replied"
         elif replying_to_other_bot:
             # 回复了别的bot的消息，不抢话
             should_reply = False
         elif mentioning_other:
             # @了别人，小概率插嘴
             should_reply = random.random() < BOT_REPLY_PROBABILITY
+            if should_reply:
+                reply_reason = "random"
         elif is_ceci:
             should_reply = random.random() < CECI_REPLY_PROB
+            if should_reply:
+                reply_reason = "ceci"
         elif sender_is_bot:
             # 其他bot在群里说话，冷却中就不接，否则小概率接茬
             if bot_cooldown:
                 should_reply = False
             else:
                 should_reply = random.random() < BOT_REPLY_PROBABILITY
+                if should_reply:
+                    reply_reason = "random"
         else:
             should_reply = False
 
         # 群里有图必回
         if image_b64:
             should_reply = True
+            if not reply_reason:
+                reply_reason = "image"
+    else:
+        reply_reason = "private"
 
     # 标记：只有回复了别的bot的消息才完全禁止插嘴
     directed_at_other = False
@@ -1279,7 +1255,8 @@ def webhook():
 
     Thread(target=process_message_background,
            args=(user_text, chat_id, sender_name, msg_date, should_reply, msg_id,
-                 image_b64, image_mime, is_voice, directed_at_other)).start()
+                 image_b64, image_mime, is_voice, directed_at_other,
+                 chat_type, reply_reason)).start()
     Thread(target=self_heal_webhook).start()
     return "ok"
 
