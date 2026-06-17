@@ -1538,6 +1538,25 @@ def webhook():
     if not user_text and not image_b64:
         return "ok"
 
+    # /checkuser ID 诊断命令：查看指定用户在群里的身份
+    if user_text.strip().lower().startswith("/checkuser"):
+        parts = user_text.strip().split()
+        if len(parts) >= 2:
+            target_id = parts[1]
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/getChatMember",
+                    params={"chat_id": chat_id, "user_id": target_id},
+                    timeout=10,
+                )
+                result = resp.json()
+                send_telegram(chat_id,
+                    f"🔍 用户 {target_id} 在本群的身份:\n{result}",
+                    reply_to_message_id=msg.get("message_id"))
+            except Exception as e:
+                send_telegram(chat_id, f"❌ 查询失败: {e}", reply_to_message_id=msg.get("message_id"))
+        return "ok"
+
     # /testadmin 诊断命令：测试bot在当前群是否有管理员权限
     if user_text.strip().lower() == "/testadmin":
         try:
