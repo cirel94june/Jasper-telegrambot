@@ -164,8 +164,9 @@ def hub_get_context(user_message, recent_messages=None, chat_id="", chat_type=""
             return data.get("inject_text", ""), data.get("recall_summary", "")
         print(f"[HUB] context failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
-        print(f"[HUB] context error: {e}")
-        _send_memory_notify(chat_id, f"⚠️ Hub recall: {e}", "")
+        print(f"[HUB-ERROR] context call failed for chat {chat_id}: {e}")
+        if not str(chat_id).startswith("-"):
+            _send_memory_notify(chat_id, f"⚠️ Hub recall: {e}", "")
     return None, ""
 
 
@@ -192,8 +193,7 @@ def hub_post_process(user_message, ai_response, chat_id="", chat_type="", reply_
             data = resp.json()
             return data.get("store_summary", "")
     except Exception as e:
-        print(f"[HUB] post-process error: {e}")
-        _send_memory_notify(chat_id, "", f"⚠️ Hub store: {e}")
+        print(f"[HUB-ERROR] post-process failed for chat {chat_id}: {e}")
     return ""
 
 
