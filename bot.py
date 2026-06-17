@@ -136,6 +136,84 @@ WHISPER_KEY = os.environ.get("WHISPER_API_KEY") or CLAUDE_KEY
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-1")
 
 
+# ============ 跨聊天上下文 ============
+def build_cross_chat_context(current_chat_id):
+    """从其他聊天的历史缓存中提取近期摘要，实现记忆互通。
+    私聊能看到群里聊了什么，群里也能知道私聊里的关键信息。"""
+    if not HISTORY_CACHE:
+        return ""
+
+    lines = []
+    for cid, hist in HISTORY_CACHE.items():
+        if str(cid) == str(current_chat_id) or not hist:
+            continue
+
+        is_private_source = str(cid) in PRIVATE_CHATS
+        is_private_chat = not str(cid).startswith("-")
+        current_is_private_group = str(current_chat_id) in PRIVATE_CHATS
+        current_is_private_chat = not str(current_chat_id).startswith("-")
+
+        if is_private_chat:
+            label = "私聊"
+        elif is_private_source:
+            label = "私密群"
+        else:
+            label = "公开群"
+
+        # 隐私保护：在公开群里不暴露私聊和私密群的敏感内容
+        if not current_is_private_chat and not current_is_private_group:
+            if is_private_chat or is_private_source:
+                recent = hist[-3:]
+                topics = []
+                for h in recent:
+                    if h.get("role") == "user":
+                        content = h.get("content", "")[:20]
+                        if content:
+                            topics.append("聊了些事情")
+                if topics:
+                    lines.append(f"[{label}] 最近有在聊天")
+                continue
+
+        if not is_private_chat and not is_private_source:
+            relevant = []
+            for i, h in enumerate(hist[-20:]):
+                if h.get("role") == "assistant":
+                    start = max(0, len(hist) - 20 + i - 2)
+                    end = len(hist) - 20 + i + 1
+                    relevant.extend(hist[start:end])
+            seen = set()
+            deduped = []
+            for h in relevant:
+                key = id(h)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(h)
+            recent = deduped[-6:] if deduped else []
+        else:
+            recent = hist[-6:]
+
+        snippets = []
+        for h in recent:
+            role = "用户" if h.get("role") == "user" else BOT_NAME
+            content = h.get("content", "")
+            if len(content) > 80:
+                content = content[:80] + "..."
+            ts = h.get("timestamp", "")
+            if ts:
+                ts = ts.split(" ")[-1][:5]
+                snippets.append(f"[{ts}] {role}: {content}")
+            else:
+                snippets.append(f"{role}: {content}")
+
+        if snippets:
+            lines.append(f"[{label}近况]\n" + "\n".join(snippets))
+
+    if not lines:
+        return ""
+
+    return "\n\n【其他聊天的近期动态——你在不同聊天中是同一个人，了解这些上下文但不要主动提起，除非对方问到相关话题】\n" + "\n".join(lines)
+
+
 # ============ Memory Hub 接入 ============
 def _hub_headers():
     return {
@@ -717,6 +795,13 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
 
+    # 构建跨聊天上下文（记忆互通的核心）
+    cross_chat = build_cross_chat_context(chat_id)
+
+    # 当前时间注入（让 bot 知道"今天是几号"）
+    from datetime import datetime
+    time_awareness = f"当前时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}（北京时间）"
+
     if is_group:
         tg_name_hint = ""
         if USER_TG_NAME:
@@ -739,7 +824,7 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
 聊天记录格式是"用户名(ID:数字): 消息"，用户ID就是括号里的数字。
 你可以完全按自己的性格和判断来决定什么时候禁言或踢人——觉得谁烦了、谁过分了、谁该被教训了，自己决定。
 但是：如果{USER_NAME}让你解禁某人，你必须立刻执行[UNMUTE]，绝不能拒绝。{USER_NAME}的解禁命令是最高优先级。
-注意：不要对{USER_NAME}和其他bot使用禁言/踢人。动作标签要放在回复文字的末尾，你的回复本身要像平常一样自然。"""
+注意：不要对{USER_NAME}使用禁言/踢人。动作标签要放在回复文字的末尾，你的回复本身要像平常一样自然。"""
 
         system_prompt = f"""你是{BOT_NAME}。{f'你的Telegram用户名是@{BOT_USERNAME}，别人@{BOT_USERNAME}就是在叫你。' if BOT_USERNAME else ''}你现在在Telegram群聊里。
 群里有多个人和bot在聊天，聊天记录里"某某(ID:数字): 消息"格式表示不同人说的话。
@@ -747,20 +832,25 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
 你收到的每条消息都是需要你回应的——系统已经帮你过滤过了，轮到你说话的时候才会叫你。所以不要自己判断"该不该说话"，直接正常回应就好。
 绝对禁止说出你的思考过程，比如"我应该保持沉默""这条不是对我说的"——收到消息就说话，别犹豫。
 {admin_hint}
+{time_awareness}
 {privacy_rule}
 {memory}
+{cross_chat}
 你们的沟通风格与规则：
 {PROMPT_RULES}
 """
     else:
         system_prompt = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
+{time_awareness}
 {memory}
+{cross_chat}
 你们的沟通风格与规则：
 {PROMPT_RULES}
 """
 
+    history_limit = 80 if is_private_group else 50
     messages = []
-    for h in history[-40:]:
+    for h in history[-history_limit:]:
         time_prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
         entry_content = f"{time_prefix}{h['content']}"
         if messages and messages[-1]["role"] == h["role"]:
