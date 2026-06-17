@@ -282,6 +282,13 @@ def hub_capture_log(user_message, ai_response, chat_id=""):
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
         return
     try:
+        cid = str(chat_id)
+        if not cid.startswith("-"):
+            chat_type = "private"
+        elif cid in PRIVATE_CHATS:
+            chat_type = "private_group"
+        else:
+            chat_type = "public_group"
         requests.post(
             f"{MEMORY_HUB_URL.rstrip('/')}/api/capture/log",
             headers=_hub_headers(),
@@ -290,7 +297,8 @@ def hub_capture_log(user_message, ai_response, chat_id=""):
                 "ai_response": ai_response[:2000],
                 "ai_id": AI_ID,
                 "platform": "telegram",
-                "chat_id": str(chat_id),
+                "chat_id": cid,
+                "chat_type": chat_type,
             },
             timeout=10,
         )
