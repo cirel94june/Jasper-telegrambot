@@ -67,7 +67,7 @@ Jasper（狗蛋）的 Telegram bot，和小克/Lucien 共用同一套代码架�
   ├─ call_claude()：组装 prompt → 调用 AI API
   ├─ 清理思维链（<think> 标签）
   ├─ parse_and_execute_actions()：解析动作标签（踢人/改签名）并执行
-  ├─ hub_post_process()：自动提取新记忆存入 Memory Hub
+  ├─ hub_capture_log()：写入 Memory Hub 缓冲；Hub 负责批量提取记忆并推动情绪面板
   └─ save_history()：保存聊天历史到 Gist（超长时硬截断）
 ```
 
