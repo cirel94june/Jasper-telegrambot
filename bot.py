@@ -3157,6 +3157,11 @@ def webhook():
     return "ok"
 
 
+@app.route("/", methods=["GET"])
+def index():
+    return "ok", 200
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return "alive"
