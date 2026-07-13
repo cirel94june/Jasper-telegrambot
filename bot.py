@@ -257,30 +257,47 @@ def _hub_headers():
 
 
 def _hub_process_capabilities(text):
-    """把 AI 回复交给 Memory Hub 执行能力标签（[记住:]/[更新状态:] 等），返回清理后的文本。
-    Hub 不可用或出错时原样返回，不影响发消息。"""
+    """执行 Hub 能力标签，但绝不让该网络调用无限阻塞 Telegram 回复。"""
     if not text or "[" not in text:
         return text
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
         return text
-    try:
-        resp = requests.post(
-            f"{MEMORY_HUB_URL.rstrip('/')}/api/capabilities/process",
-            headers=_hub_headers(),
-            json={"text": text, "ai_id": AI_ID},
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("results") or []
-            if results:
-                print(f"[HUB] capabilities executed: {[r.get('tag') for r in results]}")
-            cleaned = data.get("cleaned_text")
-            if cleaned is not None and cleaned.strip():
-                return cleaned
-    except Exception as e:
-        print(f"[HUB-WARN] capabilities process failed: {e}")
-    return text
+
+    result_box = {}
+
+    def _worker():
+        try:
+            resp = requests.post(
+                f"{MEMORY_HUB_URL.rstrip('/')}/api/capabilities/process",
+                headers=_hub_headers(),
+                json={"text": text, "ai_id": AI_ID},
+                timeout=(3, 8),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results") or []
+                if results:
+                    print(f"[HUB] capabilities executed: {[r.get('tag') for r in results]}")
+                result_box["cleaned"] = data.get("cleaned_text")
+            else:
+                print(f"[HUB-WARN] capabilities HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[HUB-WARN] capabilities process failed: {exc}")
+
+    worker = Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout=9)
+
+    if worker.is_alive():
+        print("[HUB-WARN] capabilities still running after 9s; reply continues without waiting")
+
+    cleaned = result_box.get("cleaned")
+    if cleaned is not None and cleaned.strip():
+        return cleaned
+
+    # Hub 超时也不要把内部能力标签直接发到 Telegram。
+    fallback = re.sub(r"\[(?:记住|更新状态)\s*[:：][^\]\n]{1,1000}\]", "", text).strip()
+    return fallback or text
 
 
 def hub_get_context(user_message, recent_messages=None, chat_id="", chat_type=""):
@@ -695,60 +712,90 @@ def set_member_label(chat_id, user_id, label, set_by=""):
 HISTORY_LOCK = Lock()
 
 
+def _background_load_history(chat_id, live_history):
+    try:
+        loaded = _load_history_uncached(chat_id)
+        # _load_history_uncached writes the cache itself. Restore the live list
+        # if new messages arrived while GitHub was still responding.
+        if live_history:
+            HISTORY_CACHE[chat_id] = live_history
+            print(f"[HIST] background load skipped stale overwrite chat={chat_id}")
+        else:
+            HISTORY_CACHE[chat_id] = loaded or live_history
+            print(f"[HIST] background load complete chat={chat_id} len={len(loaded or [])}")
+    except Exception as exc:
+        HISTORY_CACHE[chat_id] = live_history
+        print(f"[HIST] background load failed chat={chat_id}: {exc}")
+
+
 def load_history(chat_id):
-    # 缓存命中直接返回；冷加载加锁+双重检查——并发线程同时冷加载时，
-    # 后到的会用旧 Gist 数据覆盖缓存，抹掉先到线程刚追加的消息（“刚说过就忘”的根源之一）
+    # Cold Gist reads must never delay Telegram replies.
     if chat_id in HISTORY_CACHE:
         return HISTORY_CACHE[chat_id]
     with HISTORY_LOCK:
         if chat_id in HISTORY_CACHE:
             return HISTORY_CACHE[chat_id]
-        return _load_history_uncached(chat_id)
+        live_history = []
+        HISTORY_CACHE[chat_id] = live_history
+        Thread(target=_background_load_history,
+               args=(chat_id, live_history), daemon=True).start()
+        print(f"[HIST] cold start uses memory cache chat={chat_id}")
+        return live_history
 
 
 def _load_history_uncached(chat_id):
 
     target_url = get_target_gist_url(chat_id)
     if not GIST_TOKEN or not target_url:
-        return []
+        HISTORY_CACHE[chat_id] = []
+        return HISTORY_CACHE[chat_id]
+
+    gist_id = target_url.split("/")[4]
+    headers = {
+        "Authorization": f"Bearer {GIST_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "cloudy-webhook"
+    }
+
+    # 带重试的 Gist 读取（冷启动时 Gist API 可能慢）
+    result = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=12)
+            if resp.status_code == 200:
+                result = resp.json()
+                break
+            print(f"[WARN] Gist read attempt {attempt+1} status {resp.status_code}")
+        except Exception as e:
+            print(f"[WARN] Gist read attempt {attempt+1} failed: {e}")
+            if attempt == 0:
+                time.sleep(1)
+
+    if not result or "files" not in result or "state.json" not in result["files"]:
+        HISTORY_CACHE[chat_id] = []
+        return HISTORY_CACHE[chat_id]
 
     try:
-        gist_id = target_url.split("/")[4]
-        headers = {
-            "Authorization": f"Bearer {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "cloudy-webhook"
-        }
-        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
-        if resp.status_code != 200:
-            return []
+        content = result["files"]["state.json"].get("content", "{}")
+        state = json.loads(content) if content.strip() else {}
+    except json.JSONDecodeError:
+        state = {}
 
-        result = resp.json()
-        if "files" in result and "state.json" in result["files"]:
-            content = result["files"]["state.json"].get("content", "{}")
-            try:
-                state = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
-                state = {}
-            # 新格式：按chat_id分开存
-            if chat_id in state and isinstance(state[chat_id], dict):
-                history = state[chat_id].get("chat_history", [])
-            else:
-                # 兼容旧格式
-                history = state.get("chat_history", [])
-            
-            # 共享gist：把别的bot的回复转成user角色
-            for h in history:
-                if h.get("role") == "assistant" and h.get("bot") and h["bot"] != BOT_NAME:
-                    h["role"] = "user"
-                    h["content"] = f"{h['bot']}: {h['content']}"
-            
-            HISTORY_CACHE[chat_id] = history
-            return HISTORY_CACHE[chat_id]
-        return []
-    except Exception as e:
-        print(f"[ERROR] 读取历史失败: {e}")
-        return []
+    # 新格式：按chat_id分开存
+    if chat_id in state and isinstance(state[chat_id], dict):
+        history = state[chat_id].get("chat_history", [])
+    else:
+        history = state.get("chat_history", [])
+
+    # 共享gist：把别的bot的回复转成user角色
+    for h in history:
+        if h.get("role") == "assistant" and h.get("bot") and h["bot"] != BOT_NAME:
+            h["role"] = "user"
+            h["content"] = f"{h['bot']}: {h['content']}"
+
+    HISTORY_CACHE[chat_id] = history
+    return HISTORY_CACHE[chat_id]
+
 
 
 PENDING_SAVE_TIMERS = {}
