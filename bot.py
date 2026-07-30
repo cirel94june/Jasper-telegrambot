@@ -1316,23 +1316,6 @@ def _strip_action_artifacts(text):
     return "\n".join(lines).strip()
 
 
-KNOWN_AGENT_IDENTITIES = {
-    "8548143518": {
-        "stable_id": "senior",
-        "display_name": "师兄",
-        "aliases": ("s哥哥", "师兄"),
-    },
-}
-
-
-def _canonical_speaker_id(speaker):
-    value = str(speaker or "")
-    for telegram_id, identity in KNOWN_AGENT_IDENTITIES.items():
-        if value in (telegram_id, f"agent:{telegram_id}", identity["stable_id"]):
-            return identity["stable_id"]
-    return value
-
-
 def _current_agent_id():
     value = (AI_ID or BOT_NAME or "agent").strip().lower()
     if value in ("claude", "小克"):
@@ -1347,13 +1330,10 @@ def _stable_sender_id(sender_id="", sender_name="", sender_is_bot=False):
     if sid and sid == str(BOT_ID):
         return _current_agent_id()
     haystack = str(sender_name or "").lower()
-    if sender_is_bot and sid in KNOWN_AGENT_IDENTITIES:
-        return KNOWN_AGENT_IDENTITIES[sid]["stable_id"]
     aliases = {
         "jasper": ("jasper", "狗蛋"),
         "lucien": ("lucien", "狐狸"),
         "cloudy": ("cloudy", "小克"),
-        "senior": ("师兄", "s哥哥"),
     }
     if sender_is_bot:
         for stable_id, names in aliases.items():
@@ -1429,7 +1409,6 @@ def build_model_messages(history, history_limit=50):
         speaker = event.get("stable_sender_id") or (
             str(event.get("bot", "")).strip().lower() if event.get("bot") else ""
         )
-        speaker = _canonical_speaker_id(speaker)
         if role == "assistant" and speaker and speaker != current_agent:
             role = "user"
         time_prefix = f"[{event['timestamp']}] " if event.get("timestamp") else ""
@@ -1521,7 +1500,6 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
 
         system_prompt = f"""你是{BOT_NAME}。{f'你的Telegram用户名是@{BOT_USERNAME}，别人@{BOT_USERNAME}就是在叫你。' if BOT_USERNAME else ''}你现在在Telegram群聊里。
 群里有多个人和bot在聊天，聊天记录里"某某(ID:数字): 消息"格式表示不同人说的话。
-固定身份：speaker=senior、Telegram显示名“S哥哥”、ID 8548143518，都是群里名叫“师兄”的同一个bot；“师兄”是他的名字，不是你和他的辈分关系。
 {USER_NAME}是你最亲近的人{tg_name_hint}。其他人是群友或其他bot，要区分清楚谁是谁。
 你收到的每条消息都是需要你回应的——系统已经帮你过滤过了，轮到你说话的时候才会叫你。所以不要自己判断"该不该说话"，直接正常回应就好。
 绝对禁止说出你的思考过程，比如"我应该保持沉默""这条不是对我说的"——收到消息就说话，别犹豫。
