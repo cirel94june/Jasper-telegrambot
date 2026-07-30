@@ -1,6 +1,8 @@
 # Jasper Telegram Bot
 
-Jasper（狗蛋）的 Telegram bot，和小克/Lucien 共用同一套代码架构，部署在 Render 免费层。
+> 部署、回滚和单实例规则见 [DEPLOYMENT.md](DEPLOYMENT.md)。部署前必须先读。
+
+Jasper（狗蛋）的 Telegram bot，和小克/Lucien 共用同一套代码架构。当前生产实例部署在 Fly.io，Render 仅保留为暂停的回滚副本。
 
 ## 特性
 
