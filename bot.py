@@ -3414,6 +3414,49 @@ def webhook():
         return "ok"
 
 
+    # /whois：回复一条群消息，查看它真正由哪个 Telegram 账号发送。
+    # 只做诊断，不写标签、不改记忆，也不把不同 bot 自动合并成同一角色。
+    command_name = user_text.strip().split()[0].split("@")[0].lower() if user_text.strip() else ""
+    if command_name == "/whois" and chat_id.startswith("-"):
+        if sender_id != CECI_ID and not is_chat_admin(chat_id, sender_id):
+            send_telegram(
+                chat_id,
+                "这个身份查询只允许群管理员使用",
+                reply_to_message_id=msg.get("message_id"),
+            )
+            return "ok"
+
+        replied = msg.get("reply_to_message") or {}
+        if not replied:
+            send_telegram(
+                chat_id,
+                "请回复要查询的那条消息，再发送 /whois",
+                reply_to_message_id=msg.get("message_id"),
+            )
+            return "ok"
+
+        target_name, target_id, target_is_bot, target_username = get_message_sender_info(replied)
+        sender_chat = replied.get("sender_chat") or {}
+        if sender_chat:
+            identity_lines = [
+                f"显示身份：{target_name}",
+                f"sender_chat_id：{sender_chat.get('id', '') or '-'}",
+                "类型：匿名管理员/群身份",
+            ]
+        else:
+            identity_lines = [
+                f"显示名称：{target_name}",
+                f"用户名：@{target_username}" if target_username else "用户名：无",
+                f"Telegram ID：{target_id or '-'}",
+                f"is_bot：{str(bool(target_is_bot)).lower()}",
+            ]
+        send_telegram(
+            chat_id,
+            "这条消息的真实发送身份：\n" + "\n".join(identity_lines),
+            reply_to_message_id=msg.get("message_id"),
+        )
+        return "ok"
+
     # /checkuser ID 诊断命令：查看指定用户在群里的身份
     if user_text.strip().lower().startswith("/checkuser"):
         parts = user_text.strip().split()
