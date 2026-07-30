@@ -569,6 +569,30 @@ def self_heal_webhook():
         print(f"[ERROR] webhook 自愈失败: {e}")
 
 
+def configure_deployment_webhook():
+    """Point Telegram at the active Fly deployment without exposing the bot token."""
+    public_base_url = os.environ.get("PUBLIC_WEBHOOK_BASE_URL", "").strip().rstrip("/")
+    fly_app_name = os.environ.get("FLY_APP_NAME", "").strip()
+    if not public_base_url and fly_app_name:
+        public_base_url = f"https://{fly_app_name}.fly.dev"
+    if not public_base_url:
+        return
+    webhook_url = f"{public_base_url}/webhook"
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook",
+            data={"url": webhook_url},
+            timeout=(5, 10),
+        )
+        result = response.json()
+        if response.ok and result.get("ok"):
+            print(f"[WEBHOOK] active deployment registered: {webhook_url}")
+        else:
+            print(f"[WEBHOOK-ERROR] registration failed: {result.get('description', response.status_code)}")
+    except Exception as e:
+        print(f"[WEBHOOK-ERROR] registration failed: {e}")
+
+
 def fetch_memory(chat_id=""):
     if not MEMORY_URL or not GIST_TOKEN:
         return f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
@@ -3600,6 +3624,9 @@ def webhook():
 @app.route("/health", methods=["GET"])
 def health():
     return "alive"
+
+
+Thread(target=configure_deployment_webhook, daemon=True).start()
 
 
 if __name__ == "__main__":
