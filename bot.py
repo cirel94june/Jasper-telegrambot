@@ -993,23 +993,57 @@ def learn_identity_alias(chat_id, user_id, alias, display_name="", username="",
 HISTORY_LOCK = Lock()
 
 
+def _history_event_key(event):
+    """Stable key for merging persisted history with live Telegram events."""
+    message_id = str(event.get("telegram_message_id") or "").strip()
+    if message_id:
+        return ("telegram", message_id)
+    return (
+        "legacy",
+        str(event.get("role") or ""),
+        str(event.get("stable_sender_id") or event.get("bot") or ""),
+        str(event.get("created_at") or event.get("timestamp") or ""),
+        str(event.get("raw_text") or event.get("content") or ""),
+    )
+
+
+def _merge_history_events(persisted, live, limit=100):
+    """Merge older persisted events with newer live events without duplicates."""
+    merged = []
+    positions = {}
+    for event in list(persisted or []) + list(live or []):
+        if not isinstance(event, dict):
+            continue
+        key = _history_event_key(event)
+        if key in positions:
+            # Prefer the live copy because it contains the latest canonical fields.
+            merged[positions[key]] = event
+        else:
+            positions[key] = len(merged)
+            merged.append(event)
+    return merged[-limit:]
+
+
 def _background_load_history(chat_id, live_history):
+    chat_id = str(chat_id)
     try:
         loaded = _load_history_uncached(chat_id)
-        # _load_history_uncached writes the cache itself. Restore the live list
-        # if new messages arrived while GitHub was still responding.
-        if live_history:
+        with HISTORY_LOCK:
+            merged = _merge_history_events(loaded, live_history)
+            # Preserve the list object already held by the active message thread.
+            live_history[:] = merged
             HISTORY_CACHE[chat_id] = live_history
-            print(f"[HIST] background load skipped stale overwrite chat={chat_id}")
-        else:
-            HISTORY_CACHE[chat_id] = loaded or live_history
-            print(f"[HIST] background load complete chat={chat_id} len={len(loaded or [])}")
+        print(
+            f"[HIST] background load merged chat={chat_id} "
+            f"persisted={len(loaded or [])} total={len(merged)}"
+        )
     except Exception as exc:
         HISTORY_CACHE[chat_id] = live_history
         print(f"[HIST] background load failed chat={chat_id}: {exc}")
 
 
 def load_history(chat_id):
+    chat_id = str(chat_id)
     # Automatic Gist I/O is disabled by default: reliability beats cold history.
     if chat_id in HISTORY_CACHE:
         return HISTORY_CACHE[chat_id]
@@ -1028,11 +1062,11 @@ def load_history(chat_id):
 
 
 def _load_history_uncached(chat_id):
+    chat_id = str(chat_id)
 
     target_url = get_target_gist_url(chat_id)
     if not GIST_TOKEN or not target_url:
-        HISTORY_CACHE[chat_id] = []
-        return HISTORY_CACHE[chat_id]
+        return []
 
     gist_id = target_url.split("/")[4]
     headers = {
@@ -1056,8 +1090,7 @@ def _load_history_uncached(chat_id):
                 time.sleep(1)
 
     if not result or "files" not in result or "state.json" not in result["files"]:
-        HISTORY_CACHE[chat_id] = []
-        return HISTORY_CACHE[chat_id]
+        return []
 
     try:
         content = result["files"]["state.json"].get("content", "{}")
@@ -1077,8 +1110,7 @@ def _load_history_uncached(chat_id):
             h["role"] = "user"
             h["content"] = f"{h['bot']}: {h['content']}"
 
-    HISTORY_CACHE[chat_id] = history
-    return HISTORY_CACHE[chat_id]
+    return history
 
 
 
@@ -1098,6 +1130,7 @@ def _delayed_force_save(chat_id, delay):
 
 
 def save_history(history, chat_id, force=False):
+    chat_id = str(chat_id)
     # 原地截断而不是换新列表：让所有线程始终 append 同一个列表对象，
     # 否则还拿着旧引用的线程（比如正等 AI 回复的）追加的内容会丢
     if len(history) > 100:
@@ -1214,6 +1247,10 @@ def _sync_histories_from_gist(overwrite_idle=False):
                 with HISTORY_LOCK:
                     if cid in HISTORY_CACHE:
                         if not overwrite_idle:
+                            live = HISTORY_CACHE[cid]
+                            live[:] = _merge_history_events(fresh, live)
+                            HISTORY_CACHE[cid] = live
+                            print(f"[SYNC] merged cold history chat={cid} len={len(live)}")
                             continue
                         # 本地最近有活动的聊天以本地为准，绝不覆盖
                         if now - LAST_CHAT_ACTIVITY.get(str(cid), 0) < HISTORY_SYNC_INTERVAL:
@@ -3160,18 +3197,19 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         print(f"[TRACE] history load start chat={chat_id}")
         history = load_history(chat_id)
         print(f"[TRACE] history load end chat={chat_id} len={len(history)}")
-        history.append(_make_conversation_event(
-            role="user",
-            content=formatted_input,
-            raw_text=history_text,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            telegram_message_id=msg_id,
-            sender_type="agent" if sender_is_bot else "user",
-            stable_sender_id=_stable_sender_id(sender_id, sender_name, sender_is_bot),
-            reply_to_message_id=reply_to_message_id,
-            created_at=created_at,
-        ))
+        with HISTORY_LOCK:
+            history.append(_make_conversation_event(
+                role="user",
+                content=formatted_input,
+                raw_text=history_text,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                telegram_message_id=msg_id,
+                sender_type="agent" if sender_is_bot else "user",
+                stable_sender_id=_stable_sender_id(sender_id, sender_name, sender_is_bot),
+                reply_to_message_id=reply_to_message_id,
+                created_at=created_at,
+            ))
 
         # 旁听模式：只记录不回复（不读核心记忆，省API）
         if not should_reply:

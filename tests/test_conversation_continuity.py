@@ -16,6 +16,78 @@ import bot
 
 
 class ConversationContinuityTest(unittest.TestCase):
+    def setUp(self):
+        bot.HISTORY_CACHE.clear()
+
+    def test_background_gist_load_merges_persisted_and_live_history(self):
+        chat_id = "8749953218"
+        persisted = [
+            bot._make_conversation_event(
+                role="assistant",
+                content="一开始是一百万。",
+                raw_text="一开始是一百万。",
+                chat_id=chat_id,
+                telegram_message_id="1674",
+                sender_type="agent",
+                stable_sender_id="jasper",
+                created_at="2026-08-05T13:13:58+08:00",
+                bot_name="Jasper",
+            )
+        ]
+        live = [
+            bot._make_conversation_event(
+                role="user",
+                content="ceci: 猫猫一开始问你要多少钱来着？",
+                raw_text="猫猫一开始问你要多少钱来着？",
+                chat_id=chat_id,
+                telegram_message_id="1685",
+                sender_type="user",
+                stable_sender_id="ceci",
+                created_at="2026-08-05T13:24:59+08:00",
+            )
+        ]
+        bot.HISTORY_CACHE[chat_id] = live
+
+        with mock.patch.object(bot, "_load_history_uncached", return_value=persisted):
+            bot._background_load_history(chat_id, live)
+
+        self.assertIs(bot.HISTORY_CACHE[chat_id], live)
+        self.assertEqual(
+            [event["telegram_message_id"] for event in live],
+            ["1674", "1685"],
+        )
+        messages = bot.build_model_messages(live, history_limit=50)
+        serialized = json.dumps(messages, ensure_ascii=False)
+        self.assertIn("一开始是一百万", serialized)
+        self.assertIn("猫猫一开始问你要多少钱", serialized)
+
+    def test_history_merge_deduplicates_gist_copy_of_live_message(self):
+        duplicate = bot._make_conversation_event(
+            role="user",
+            content="new canonical content",
+            raw_text="new canonical content",
+            chat_id="8749953218",
+            telegram_message_id="1685",
+            sender_type="user",
+            stable_sender_id="ceci",
+            created_at="2026-08-05T13:24:59+08:00",
+        )
+        old_copy = dict(duplicate, content="old persisted content")
+
+        merged = bot._merge_history_events([old_copy], [duplicate])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["content"], "new canonical content")
+
+    def test_private_chat_history_uses_string_key_for_gist_json(self):
+        with mock.patch.object(bot, "GIST_HISTORY_IO_ENABLED", True):
+            with mock.patch.object(bot, "Thread") as thread:
+                history = bot.load_history(8749953218)
+
+        self.assertIs(history, bot.HISTORY_CACHE["8749953218"])
+        self.assertNotIn(8749953218, bot.HISTORY_CACHE)
+        self.assertEqual(thread.call_args.kwargs["args"][0], "8749953218")
+
     def test_public_proactive_never_reads_private_memory_or_posts_private_topics(self):
         public_chat = "-100999000111"
         bot.HISTORY_CACHE[public_chat] = []
