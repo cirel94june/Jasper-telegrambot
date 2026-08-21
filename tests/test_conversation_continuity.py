@@ -141,6 +141,26 @@ class ConversationContinuityTest(unittest.TestCase):
         cleaned = bot._sanitize_model_visible_reply(leaked)
         self.assertEqual(cleaned, "本少爷才是不含杂质的纯天然高贵凤头！")
 
+    def test_reasoning_envelopes_and_headers_are_removed(self):
+        cases = (
+            ("<analysis>We need to answer carefully.</analysis>当然记得。", "当然记得。"),
+            ("<|analysis|>The user is asking about memory.<|final|>当然记得。", "当然记得。"),
+            ("Analysis:\nThe user is asking about memory.\nLet's craft a concise reply.\n\n当然记得。", "当然记得。"),
+            ("Reasoning:\nNeed to answer in Chinese.\nFinal answer: 当然记得。", "当然记得。"),
+        )
+        for leaked, expected in cases:
+            with self.subTest(leaked=leaked):
+                cleaned, _ = bot.extract_thinking(leaked)
+                self.assertEqual(bot._sanitize_model_visible_reply(cleaned), expected)
+
+    def test_output_guard_preserves_character_dialogue(self):
+        dialogue = "我需要你现在抱抱我。\n我们得走了，别磨蹭。\n你又在分析本少爷？\n分析什么分析，本少爷饿了。"
+        self.assertEqual(bot._sanitize_model_visible_reply(dialogue), dialogue)
+
+    def test_plain_meta_reasoning_lines_are_removed(self):
+        leaked = "The user is asking why Jasper forgot.\nWe need to answer concisely.\n当然记得。"
+        self.assertEqual(bot._sanitize_model_visible_reply(leaked), "当然记得。")
+
     def test_jasper_remembers_its_own_previous_message_without_hub(self):
         chat_id = "-100000000001"
         history = [

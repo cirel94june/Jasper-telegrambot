@@ -1860,11 +1860,97 @@ def _should_show_cot(chat_id):
     return COT_ENABLED and (not cid.startswith("-") or cid in PRIVATE_CHATS)
 
 
+def _strip_reasoning_sections(text):
+    """Strip common proxy/model reasoning envelopes while retaining final text."""
+    cleaned = str(text or "")
+    reasoning_names = r"analysis|reasoning|thoughts?|internal[_ -]?monologue|scratchpad"
+
+    cleaned = re.sub(
+        rf'(?is)<\|(?:{reasoning_names})\|>.*?(?=<\|(?:final|answer|response)\|>|$)',
+        '',
+        cleaned,
+    )
+    cleaned = re.sub(r'(?i)<\|(?:final|answer|response|assistant)\|>', '', cleaned)
+    cleaned = re.sub(
+        rf'(?is)\[(?:{reasoning_names})\].*?\[/(?:{reasoning_names})\]',
+        '',
+        cleaned,
+    )
+    cleaned = re.sub(
+        rf'(?is)<(?:{reasoning_names})\b[^>]*>.*?</(?:{reasoning_names})\s*>',
+        '',
+        cleaned,
+    )
+    # An unclosed reasoning tag is never safe to show.
+    cleaned = re.sub(rf'(?is)<(?:{reasoning_names})\b[^>]*>.*$', '', cleaned)
+
+    reasoning_header = re.compile(
+        r'^\s*(?:#{1,6}\s*)?(?:analysis|reasoning|thoughts?|internal monologue|scratchpad|思考|分析|推理|思路)(?:\s*[:：]\s*(.*)|\s*)$',
+        re.IGNORECASE,
+    )
+    final_header = re.compile(
+        r'^\s*(?:#{1,6}\s*)?(?:final(?: answer| response)?|answer|response|最终回答|最终回复|回复|答复)\s*[:：]\s*(.*)$',
+        re.IGNORECASE,
+    )
+    result = []
+    in_reasoning = False
+    saw_gap = False
+    for line in cleaned.splitlines():
+        final_match = final_header.match(line)
+        if final_match:
+            in_reasoning = False
+            saw_gap = False
+            if (final_match.group(1) or "").strip():
+                result.append(final_match.group(1).strip())
+            continue
+        reasoning_match = reasoning_header.match(line)
+        if reasoning_match:
+            in_reasoning = True
+            saw_gap = False
+            continue
+        if in_reasoning:
+            if not line.strip():
+                saw_gap = True
+                continue
+            if saw_gap:
+                # A plain paragraph after a gap is normally the visible answer.
+                in_reasoning = False
+                saw_gap = False
+                result.append(line)
+            continue
+        result.append(line)
+    return "\n".join(result).strip()
+
+
+def _looks_like_internal_reasoning(line):
+    stripped = line.strip()
+    if not stripped:
+        return False
+    english_patterns = (
+        r'^(?:the )?user (?:is |has |was )?(?:asking|asks|asked|wants|wanted|expects|requested|says|said)\b',
+        r'^(?:let(?:\'s| us)) (?:analy[sz]e|craft|compose|formulate|answer|respond|reply|reason|think)\b',
+        r'^(?:we|i) (?:need|should|must|have) (?:to )?(?:answer|respond|reply|mention|avoid|follow|comply|provide|craft|explain|address|acknowledge|not reveal|be concise|use chinese|maintain (?:the )?persona)\b',
+        r'^(?:need|must|should) (?:to )?(?:answer|respond|reply|mention|avoid|follow|provide|craft|explain|address)\b',
+        r'^(?:given|according to) (?:the )?(?:system|developer|user) (?:prompt|message|instruction)s?\b',
+    )
+    chinese_patterns = (
+        r'^(?:用户|对方)(?:在|刚才)?(?:问|询问|想要|要求|希望|提到|说了).*(?:回答|回复|回应|需要|应该)',
+        r'^(?:我|我们)?(?:需要|应该|必须)(?:先)?(?:回答|回复|回应|处理|避免|遵守|判断|解释|保持人设)',
+        r'^(?:先|接下来)(?:分析|判断|回答|回复|回应|组织语言)',
+        r'^这里(?:需要|应该|不能|可以)(?:回答|回复|回应|提及|暴露|遵守)',
+        r'^(?:根据|按照)(?:系统|开发者|用户)(?:提示|指令|要求|消息)',
+    )
+    return any(re.search(pattern, stripped, re.IGNORECASE) for pattern in english_patterns) or any(
+        re.search(pattern, stripped) for pattern in chinese_patterns
+    )
+
+
 def _sanitize_model_visible_reply(reply):
     """Remove context metadata and untagged internal reasoning before Telegram send."""
     if not reply:
         return ""
 
+    cleaned = _strip_reasoning_sections(reply)
     cleaned = re.sub(
         r'(?im)^\s*\[?\s*(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+'
         r'(?:\s+(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+)*\s*\]?\s*',
@@ -1900,7 +1986,8 @@ def _sanitize_model_visible_reply(reply):
             r'(?i)^\s*(?:system|developer|assistant)\s*(?:prompt|instruction)s?\s*[:：]',
             stripped,
         )
-        if underscore_reasoning or prose_reasoning or chinese_reasoning or system_header:
+        if (underscore_reasoning or prose_reasoning or chinese_reasoning or system_header
+                or _looks_like_internal_reasoning(stripped)):
             print(f"[OUTPUT-GUARD] removed internal reasoning: {stripped[:120]!r}")
             continue
         safe_lines.append(line)
@@ -1912,16 +1999,14 @@ def extract_thinking(reply):
     if not reply:
         return "", ""
     thinking_parts = []
-    patterns = [
-        r'<think>(.*?)</think>',
-        r'<thinking>(.*?)</thinking>',
-    ]
+    patterns = [r'<think\b[^>]*>(.*?)</think\s*>', r'<thinking\b[^>]*>(.*?)</thinking\s*>']
     for pat in patterns:
         thinking_parts.extend(m.strip() for m in re.findall(pat, reply, flags=re.DOTALL | re.IGNORECASE) if m.strip())
-    clean = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL | re.IGNORECASE).strip()
-    clean = re.sub(r'<thinking>.*?</thinking>', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
-    clean = re.sub(r'<think>.*', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
-    clean = re.sub(r'<thinking>.*', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean = re.sub(r'<think\b[^>]*>.*?</think\s*>', '', reply, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean = re.sub(r'<thinking\b[^>]*>.*?</thinking\s*>', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean = re.sub(r'<think\b[^>]*>.*', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean = re.sub(r'<thinking\b[^>]*>.*', '', clean, flags=re.DOTALL | re.IGNORECASE).strip()
+    clean = _strip_reasoning_sections(clean)
     cot = "\n\n".join(thinking_parts).strip()
     if len(cot) > COT_MAX_CHARS:
         cot = cot[:COT_MAX_CHARS].rstrip() + "..."
@@ -3322,6 +3407,8 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         ]
         for pat in thinking_patterns:
             reply = re.sub(pat, '', reply, flags=re.MULTILINE).strip()
+        # Actions and proxy wrappers can expose a second layer of model text.
+        reply = _sanitize_model_visible_reply(reply)
         # 如果清理完变空了，跳过不发
         if not reply:
             save_history(history, chat_id)
