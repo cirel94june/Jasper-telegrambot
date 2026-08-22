@@ -31,6 +31,18 @@ class ConversationContinuityTest(unittest.TestCase):
         with mock.patch.object(bot, "COT_ENABLED", False):
             self.assertFalse(bot._should_show_cot("8749953218"))
 
+    def test_visible_reply_keeps_final_after_inline_drafting_instructions(self):
+        raw = (
+            "惊喜要是提前说出来就不叫惊喜了！”"
+            "3.精炼，1-2条。4.输出。"
+            "就是啊！你们两个有没有情调啊！"
+        )
+
+        self.assertEqual(
+            bot._sanitize_model_visible_reply(raw),
+            "就是啊！你们两个有没有情调啊！",
+        )
+
     def test_background_gist_load_merges_persisted_and_live_history(self):
         chat_id = "8749953218"
         persisted = [
