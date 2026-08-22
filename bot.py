@@ -67,7 +67,8 @@ WEBHOOK_CHECK_INTERVAL = 7200
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
 COT_ENABLED_RAW = os.environ.get("SHOW_COT", "").lower()
-COT_ENABLED = COT_ENABLED_RAW in ("1", "true", "yes") or (not COT_ENABLED_RAW and os.environ.get("AI_ID", "").lower() in ("cloudy", "claude"))
+# Never expose model reasoning by default. Operators must explicitly opt in.
+COT_ENABLED = COT_ENABLED_RAW in ("1", "true", "yes")
 COT_MAX_CHARS = int(os.environ.get("COT_MAX_CHARS", "1200"))
 COT_CACHE = {}
 COT_CACHE_TTL = 1800
@@ -1955,7 +1956,7 @@ def _sanitize_model_visible_reply(reply):
         r'(?im)^\s*\[?\s*(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+'
         r'(?:\s+(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+)*\s*\]?\s*',
         '',
-        str(reply),
+        cleaned,
     )
 
     safe_lines = []
@@ -4031,3 +4032,4 @@ Thread(target=configure_deployment_webhook, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
