@@ -1946,12 +1946,30 @@ def _looks_like_internal_reasoning(line):
     )
 
 
+def _strip_embedded_prompt_leak(text):
+    """Keep the final answer when numbered drafting instructions leak inline."""
+    cleaned = str(text or "")
+    # Some proxies concatenate: draft + “3.精炼…4.输出。” + final answer.
+    # Require both a drafting instruction and a later output instruction so
+    # ordinary numbered lists are not mistaken for prompt leakage.
+    leak = re.search(
+        r'(?is)(?:^|[。！？；;”"\'])\s*\d+[.、]\s*'
+        r'(?:精炼|润色|改写|控制字数|保持人设|简短|合并)'
+        r'.{0,240}?\d+[.、]\s*(?:最终)?(?:输出|回复|回答)\s*[：:。]?\s*(.+)$',
+        cleaned,
+    )
+    if leak and leak.group(1).strip():
+        print("[OUTPUT-GUARD] removed embedded drafting instructions")
+        return leak.group(1).strip()
+    return cleaned
+
+
 def _sanitize_model_visible_reply(reply):
     """Remove context metadata and untagged internal reasoning before Telegram send."""
     if not reply:
         return ""
 
-    cleaned = _strip_reasoning_sections(reply)
+    cleaned = _strip_embedded_prompt_leak(_strip_reasoning_sections(reply))
     cleaned = re.sub(
         r'(?im)^\s*\[?\s*(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+'
         r'(?:\s+(?:speaker|message_id|reply_to|thread_id)=[^\s\]\n]+)*\s*\]?\s*',
