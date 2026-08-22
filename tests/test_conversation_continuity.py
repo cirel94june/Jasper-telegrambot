@@ -19,6 +19,18 @@ class ConversationContinuityTest(unittest.TestCase):
     def setUp(self):
         bot.HISTORY_CACHE.clear()
 
+    def test_visible_reply_does_not_restore_tagged_reasoning(self):
+        raw = (
+            "<reasoning>The user asks for a concise answer. I should reply in Chinese.</reasoning>\n"
+            "[speaker=assistant message_id=42] 最终回答"
+        )
+
+        self.assertEqual(bot._sanitize_model_visible_reply(raw), "最终回答")
+
+    def test_cot_display_requires_explicit_opt_in(self):
+        with mock.patch.object(bot, "COT_ENABLED", False):
+            self.assertFalse(bot._should_show_cot("8749953218"))
+
     def test_background_gist_load_merges_persisted_and_live_history(self):
         chat_id = "8749953218"
         persisted = [
@@ -224,3 +236,4 @@ class ConversationContinuityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
