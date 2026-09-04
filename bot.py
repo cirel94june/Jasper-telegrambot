@@ -22,7 +22,7 @@ import random
 import time
 from datetime import datetime
 from flask import Flask, request
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -1916,13 +1916,13 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
                     body = {"model": model, "max_tokens": 1500,
                             "messages": [{"role": "system", "content": system_prompt}] + route_messages}
-                    resp = requests.post(f"{b}/chat/completions", headers=headers, json=body, timeout=120)
+                    resp = requests.post(f"{b}/chat/completions", headers=headers, json=body, timeout=(5, 20))
                 else:
                     headers = {"x-api-key": api_key, "content-type": "application/json",
                                "anthropic-version": "2023-06-01"}
                     body = {"model": model, "max_tokens": 1500,
                             "system": system_prompt, "messages": route_messages}
-                    resp = requests.post(f"{b}/messages", headers=headers, json=body, timeout=120)
+                    resp = requests.post(f"{b}/messages", headers=headers, json=body, timeout=(5, 20))
                 try:
                     result = resp.json()
                 except Exception:
@@ -1944,34 +1944,14 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                     return re.sub(r'\n{2,}', '\n', str(text).strip())
                 print(f"[ERROR] API 无可用文本: HTTP {resp.status_code} model={model}, body={str(result)[:200]}")
             except requests.exceptions.Timeout:
-                print(f"[WARN] 模型 {model} 超时(120s)，换下一个")
+                print(f"[WARN] 模型 {model} 超时，换下一个")
             except Exception as e:
                 print(f"[WARN] 模型 {model} 调用失败: {e}")
         return None
 
-    def _run_api_with_deadline(api_base, api_key, api_format, models, label):
-        result_box = {}
-
-        def _worker():
-            try:
-                result_box["reply"] = _do_api_call(api_base, api_key, api_format, models)
-            except Exception as exc:
-                result_box["error"] = exc
-
-        worker = Thread(target=_worker, daemon=True)
-        worker.start()
-        hard_timeout = float(os.environ.get("MODEL_API_HARD_TIMEOUT", "20"))
-        worker.join(timeout=hard_timeout)
-        if worker.is_alive():
-            print(f"[API-WARN] {label} hard timeout after {hard_timeout:g}s; moving on")
-            return None
-        if result_box.get("error"):
-            raise result_box["error"]
-        return result_box.get("reply")
-
     # 先试主API
     try:
-        reply = _run_api_with_deadline(CLAUDE_URL, CLAUDE_KEY, API_FORMAT, CLAUDE_MODELS, "primary")
+        reply = _do_api_call(CLAUDE_URL, CLAUDE_KEY, API_FORMAT, CLAUDE_MODELS)
         if reply:
             return _hub_process_capabilities(reply)
     except Exception as e:
@@ -1981,7 +1961,7 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
     if BACKUP_API_KEY and BACKUP_BASE_URL and BACKUP_MODELS:
         print(f"[INFO] 切换到备用API...")
         try:
-            reply = _run_api_with_deadline(BACKUP_BASE_URL, BACKUP_API_KEY, BACKUP_API_FORMAT, BACKUP_MODELS, "backup")
+            reply = _do_api_call(BACKUP_BASE_URL, BACKUP_API_KEY, BACKUP_API_FORMAT, BACKUP_MODELS)
             if reply:
                 return _hub_process_capabilities(reply)
         except Exception as e:
@@ -3627,8 +3607,9 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
-def _run_chat_process(chat_id, process_lock, args):
+def _run_chat_process(chat_id, process_lock, args, started_event):
     with process_lock:
+        started_event.set()
         try:
             process_message_background(*args)
         except Exception as exc:
@@ -3640,12 +3621,14 @@ def enqueue_process_message(*args):
     chat_id = str(args[1])
     with CHAT_PROCESS_LOCKS_GUARD:
         process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
+    started_event = Event()
     Thread(
         target=_run_chat_process,
-        args=(chat_id, process_lock, args),
+        args=(chat_id, process_lock, args, started_event),
         daemon=True,
     ).start()
-    print(f"[PROCESS] started chat={chat_id}")
+    entered = started_event.wait(timeout=1)
+    print(f"[PROCESS] started chat={chat_id} entered={entered}")
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
