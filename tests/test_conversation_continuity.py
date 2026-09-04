@@ -16,6 +16,25 @@ import bot
 
 
 class ConversationContinuityTest(unittest.TestCase):
+    def test_fly_runtime_defers_webhook_ownership_to_render(self):
+        with mock.patch.dict(os.environ, {
+            "FLY_APP_NAME": "jasper-telegrambot",
+            "PUBLIC_WEBHOOK_BASE_URL": "",
+            "JASPER_PRIMARY_WEBHOOK_BASE_URL": "",
+        }):
+            self.assertEqual(
+                bot._deployment_webhook_base_url(),
+                "https://jasper-telegrambot.onrender.com",
+            )
+            self.assertTrue(bot._is_standby_runtime())
+
+    def test_explicit_fly_webhook_url_can_reactivate_fly(self):
+        with mock.patch.dict(os.environ, {
+            "FLY_APP_NAME": "jasper-telegrambot",
+            "PUBLIC_WEBHOOK_BASE_URL": "https://jasper-telegrambot.fly.dev",
+        }):
+            self.assertFalse(bot._is_standby_runtime())
+
     def test_model_api_hard_timeout_is_bounded(self):
         with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": ""}):
             self.assertEqual(bot._model_api_hard_timeout(), 20.0)

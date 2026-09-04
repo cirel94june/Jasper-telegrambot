@@ -579,12 +579,28 @@ def self_heal_webhook():
         print(f"[ERROR] webhook 自愈失败: {e}")
 
 
-def configure_deployment_webhook():
-    """Point Telegram at the active Fly deployment without exposing the bot token."""
+def _deployment_webhook_base_url():
     public_base_url = os.environ.get("PUBLIC_WEBHOOK_BASE_URL", "").strip().rstrip("/")
     fly_app_name = os.environ.get("FLY_APP_NAME", "").strip()
-    if not public_base_url and fly_app_name:
-        public_base_url = f"https://{fly_app_name}.fly.dev"
+    if public_base_url:
+        return public_base_url
+    if fly_app_name:
+        configured_owner = os.environ.get("JASPER_PRIMARY_WEBHOOK_BASE_URL", "").strip()
+        return (configured_owner or "https://jasper-telegrambot.onrender.com").rstrip("/")
+    return ""
+
+
+def _is_standby_runtime():
+    fly_app_name = os.environ.get("FLY_APP_NAME", "").strip()
+    if not fly_app_name:
+        return False
+    fly_base_url = f"https://{fly_app_name}.fly.dev"
+    return _deployment_webhook_base_url() != fly_base_url
+
+
+def configure_deployment_webhook():
+    """Register the single deployment that currently owns Telegram delivery."""
+    public_base_url = _deployment_webhook_base_url()
     if not public_base_url:
         return
     webhook_url = f"{public_base_url}/webhook"
@@ -596,11 +612,15 @@ def configure_deployment_webhook():
         )
         result = response.json()
         if response.ok and result.get("ok"):
-            print(f"[WEBHOOK] active deployment registered: {webhook_url}")
+            print(f"[WEBHOOK] active deployment registered: {webhook_url}", flush=True)
         else:
-            print(f"[WEBHOOK-ERROR] registration failed: {result.get('description', response.status_code)}")
+            print(
+                f"[WEBHOOK-ERROR] registration failed: "
+                f"{result.get('description', response.status_code)}",
+                flush=True,
+            )
     except Exception as e:
-        print(f"[WEBHOOK-ERROR] registration failed: {e}")
+        print(f"[WEBHOOK-ERROR] registration failed: {e}", flush=True)
 
 
 def fetch_memory(chat_id=""):
@@ -2922,6 +2942,9 @@ def proactive_background_loop():
 def start_proactive_background():
     global PROACTIVE_BACKGROUND_STARTED
     if PROACTIVE_BACKGROUND_STARTED:
+        return
+    if _is_standby_runtime():
+        print("[DEPLOYMENT] Fly is standby; proactive loop disabled", flush=True)
         return
     if PROACTIVE_ENABLED and PROACTIVE_BACKGROUND_ENABLED and PROACTIVE_CHAT_IDS:
         PROACTIVE_BACKGROUND_STARTED = True
