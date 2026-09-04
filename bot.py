@@ -135,6 +135,7 @@ MEMORY_HUB_URL = os.environ.get("MEMORY_HUB_URL", "")  # e.g. http://172.245.180
 MEMORY_HUB_SECRET = os.environ.get("MEMORY_HUB_SECRET", "")
 AI_ID = os.environ.get("AI_ID", "")  # cloudy / lucien / jasper
 MEMORY_NOTIFY = os.environ.get("MEMORY_NOTIFY", "").lower() in ("1", "true", "yes")
+MEMORY_RECALL_ENABLED = os.environ.get("MEMORY_RECALL_ENABLED", "true").lower() in ("1", "true", "yes")
 CONTEXT_DEBUG = os.environ.get("CONTEXT_DEBUG", "false").lower() in ("1", "true", "yes")
 
 # 人格
@@ -355,6 +356,8 @@ def _hub_get_context_network(user_message, recent_messages=None, chat_id="", cha
 
 def hub_get_context(user_message, recent_messages=None, chat_id="", chat_type=""):
     """Give Hub one bounded chance; never let recall hold a Telegram reply."""
+    if not MEMORY_RECALL_ENABLED:
+        return None, ""
     if not MEMORY_HUB_URL or not MEMORY_HUB_SECRET or not AI_ID:
         return None, ""
 

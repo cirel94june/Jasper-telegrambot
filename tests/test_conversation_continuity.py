@@ -16,6 +16,12 @@ import bot
 
 
 class ConversationContinuityTest(unittest.TestCase):
+    def test_disabled_memory_recall_never_starts_hub_network_call(self):
+        with mock.patch.object(bot, "MEMORY_RECALL_ENABLED", False), \
+                mock.patch.object(bot, "_hub_get_context_network") as network_call:
+            self.assertEqual(bot.hub_get_context("hello", chat_id="123"), (None, ""))
+        network_call.assert_not_called()
+
     def test_telegram_identity_uses_numeric_ids_and_keeps_taught_bot_alias(self):
         chat_id = "-100999001234"
         bot.USER_NAME_MAP.pop(chat_id, None)
