@@ -22,7 +22,7 @@ import random
 import time
 from datetime import datetime
 from flask import Flask, request
-from threading import Thread, Lock, Event
+from threading import Thread, Lock
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -1916,13 +1916,13 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
                     body = {"model": model, "max_tokens": 1500,
                             "messages": [{"role": "system", "content": system_prompt}] + route_messages}
-                    resp = requests.post(f"{b}/chat/completions", headers=headers, json=body, timeout=(5, 20))
+                    resp = requests.post(f"{b}/chat/completions", headers=headers, json=body, timeout=(4, 12))
                 else:
                     headers = {"x-api-key": api_key, "content-type": "application/json",
                                "anthropic-version": "2023-06-01"}
                     body = {"model": model, "max_tokens": 1500,
                             "system": system_prompt, "messages": route_messages}
-                    resp = requests.post(f"{b}/messages", headers=headers, json=body, timeout=(5, 20))
+                    resp = requests.post(f"{b}/messages", headers=headers, json=body, timeout=(4, 12))
                 try:
                     result = resp.json()
                 except Exception:
@@ -3607,28 +3607,14 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
-def _run_chat_process(chat_id, process_lock, args, started_event):
-    with process_lock:
-        started_event.set()
-        try:
-            process_message_background(*args)
-        except Exception as exc:
-            print(f"[PROCESS] worker error chat={chat_id}: {exc}")
-
-
 def enqueue_process_message(*args):
-    """Serialize one bot's work per chat; different chats still run in parallel."""
+    """Process inside the webhook request so free web runtimes cannot pause the work."""
     chat_id = str(args[1])
     with CHAT_PROCESS_LOCKS_GUARD:
         process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
-    started_event = Event()
-    Thread(
-        target=_run_chat_process,
-        args=(chat_id, process_lock, args, started_event),
-        daemon=True,
-    ).start()
-    entered = started_event.wait(timeout=1)
-    print(f"[PROCESS] started chat={chat_id} entered={entered}")
+    print(f"[PROCESS] entered synchronous path chat={chat_id}")
+    with process_lock:
+        process_message_background(*args)
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
