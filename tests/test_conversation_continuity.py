@@ -16,6 +16,14 @@ import bot
 
 
 class ConversationContinuityTest(unittest.TestCase):
+    def test_model_api_hard_timeout_is_bounded(self):
+        with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": ""}):
+            self.assertEqual(bot._model_api_hard_timeout(), 20.0)
+        with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "2"}):
+            self.assertEqual(bot._model_api_hard_timeout(), 8.0)
+        with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "999"}):
+            self.assertEqual(bot._model_api_hard_timeout(), 60.0)
+
     def test_disabled_memory_recall_never_starts_hub_network_call(self):
         with mock.patch.object(bot, "MEMORY_RECALL_ENABLED", False), \
                 mock.patch.object(bot, "_hub_get_context_network") as network_call:

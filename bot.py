@@ -1765,6 +1765,16 @@ def build_model_messages(history, history_limit=50):
     return messages
 
 
+def _model_api_hard_timeout():
+    """Bound one provider route so a stuck connection can fall through to backup."""
+    raw_value = os.environ.get("MODEL_API_HARD_TIMEOUT", "20") or "20"
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        value = 20.0
+    return max(8.0, min(value, 60.0))
+
+
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
@@ -1949,9 +1959,31 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 print(f"[WARN] 模型 {model} 调用失败: {e}")
         return None
 
+    def _run_api_with_deadline(api_base, api_key, api_format, models, label):
+        result_box = {}
+
+        def _worker():
+            try:
+                result_box["reply"] = _do_api_call(api_base, api_key, api_format, models)
+            except Exception as exc:
+                result_box["error"] = exc
+
+        worker = Thread(target=_worker, daemon=True)
+        worker.start()
+        hard_timeout = _model_api_hard_timeout()
+        worker.join(timeout=hard_timeout)
+        if worker.is_alive():
+            print(f"[API-WARN] {label} hard timeout after {hard_timeout:g}s; moving on")
+            return None
+        if result_box.get("error"):
+            raise result_box["error"]
+        return result_box.get("reply")
+
     # 先试主API
     try:
-        reply = _do_api_call(CLAUDE_URL, CLAUDE_KEY, API_FORMAT, CLAUDE_MODELS)
+        reply = _run_api_with_deadline(
+            CLAUDE_URL, CLAUDE_KEY, API_FORMAT, CLAUDE_MODELS, "primary"
+        )
         if reply:
             return _hub_process_capabilities(reply)
     except Exception as e:
@@ -1961,7 +1993,9 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
     if BACKUP_API_KEY and BACKUP_BASE_URL and BACKUP_MODELS:
         print(f"[INFO] 切换到备用API...")
         try:
-            reply = _do_api_call(BACKUP_BASE_URL, BACKUP_API_KEY, BACKUP_API_FORMAT, BACKUP_MODELS)
+            reply = _run_api_with_deadline(
+                BACKUP_BASE_URL, BACKUP_API_KEY, BACKUP_API_FORMAT, BACKUP_MODELS, "backup"
+            )
             if reply:
                 return _hub_process_capabilities(reply)
         except Exception as e:
