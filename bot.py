@@ -23,7 +23,6 @@ import time
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
-from queue import Queue
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -61,8 +60,8 @@ PRIVATE_SAVE_INTERVAL = 30
 LAST_WEBHOOK_CHECK = 0
 PROCESSED_MESSAGES = set()
 PROCESSED_LOCK = Lock()
-CHAT_PROCESS_QUEUES = {}
-CHAT_PROCESS_QUEUE_LOCK = Lock()
+CHAT_PROCESS_LOCKS = {}
+CHAT_PROCESS_LOCKS_GUARD = Lock()
 WEBHOOK_CHECK_INTERVAL = 7200
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
@@ -3628,28 +3627,25 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
-def _chat_process_worker(chat_id, work_queue):
-    while True:
-        args = work_queue.get()
+def _run_chat_process(chat_id, process_lock, args):
+    with process_lock:
         try:
             process_message_background(*args)
         except Exception as exc:
-            print(f"[QUEUE] worker error chat={chat_id}: {exc}")
-        finally:
-            work_queue.task_done()
+            print(f"[PROCESS] worker error chat={chat_id}: {exc}")
 
 
 def enqueue_process_message(*args):
     """Serialize one bot's work per chat; different chats still run in parallel."""
     chat_id = str(args[1])
-    with CHAT_PROCESS_QUEUE_LOCK:
-        work_queue = CHAT_PROCESS_QUEUES.get(chat_id)
-        if work_queue is None:
-            work_queue = Queue()
-            CHAT_PROCESS_QUEUES[chat_id] = work_queue
-            Thread(target=_chat_process_worker, args=(chat_id, work_queue), daemon=True).start()
-    work_queue.put(args)
-    print(f"[QUEUE] enqueued chat={chat_id} pending={work_queue.qsize()}")
+    with CHAT_PROCESS_LOCKS_GUARD:
+        process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
+    Thread(
+        target=_run_chat_process,
+        args=(chat_id, process_lock, args),
+        daemon=True,
+    ).start()
+    print(f"[PROCESS] started chat={chat_id}")
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
