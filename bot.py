@@ -2249,12 +2249,24 @@ def handle_cot_callback(callback_query):
                   json={"callback_query_id": query_id, "text": "展开思路", "show_alert": False}, timeout=5)
     send_telegram(chat_id, "🧠 思路\n" + item.get("text", ""), reply_to_message_id=message_id)
 # ============ Telegram 发送 ============
-def send_chat_action(chat_id, action="typing"):
+def _send_chat_action_worker(chat_id, action):
     try:
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
                       json={"chat_id": chat_id, "action": action}, timeout=5)
     except Exception as e:
-        print(f"[ERROR] chat action 失败: {e}")
+        print(f"[ERROR] chat action 失败: {e}", flush=True)
+
+
+def send_chat_action(chat_id, action="typing"):
+    """Typing indicators are cosmetic and must never delay a real reply."""
+    try:
+        Thread(
+            target=_send_chat_action_worker,
+            args=(chat_id, action),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        print(f"[ERROR] chat action worker 启动失败: {e}", flush=True)
 
 
 def pick_reaction_emoji(text):
