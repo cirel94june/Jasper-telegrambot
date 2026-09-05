@@ -3664,14 +3664,26 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
+def _run_chat_process(chat_id, process_lock, args):
+    """Run one chat job off-request while preserving per-chat serialization."""
+    with process_lock:
+        try:
+            process_message_background(*args)
+        except Exception as exc:
+            print(f"[PROCESS] worker error chat={chat_id}: {exc}")
+
+
 def enqueue_process_message(*args):
-    """Process inside the webhook request so free web runtimes cannot pause the work."""
+    """Acknowledge Telegram quickly; process each chat serially in the background."""
     chat_id = str(args[1])
     with CHAT_PROCESS_LOCKS_GUARD:
         process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
-    print(f"[PROCESS] entered synchronous path chat={chat_id}")
-    with process_lock:
-        process_message_background(*args)
+    Thread(
+        target=_run_chat_process,
+        args=(chat_id, process_lock, args),
+        daemon=True,
+    ).start()
+    print(f"[PROCESS] scheduled background path chat={chat_id}")
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
@@ -4207,4 +4219,5 @@ Thread(target=configure_deployment_webhook, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
