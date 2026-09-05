@@ -154,6 +154,18 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", args))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
 
+    def test_typing_indicator_never_blocks_the_reply_path(self):
+        fake_thread = mock.Mock()
+        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
+            with mock.patch.object(bot.requests, "post") as post:
+                bot.send_chat_action("-100123", "typing")
+
+        post.assert_not_called()
+        fake_thread.start.assert_called_once_with()
+        self.assertIs(thread_cls.call_args.kwargs["target"], bot._send_chat_action_worker)
+        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", "typing"))
+        self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
     def test_stale_reply_lock_is_replaced(self):
         chat_id = "-100123"
         stale_lock = bot.Lock()
