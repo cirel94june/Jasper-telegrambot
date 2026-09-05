@@ -1795,19 +1795,33 @@ def _model_api_hard_timeout():
     return max(8.0, min(value, 60.0))
 
 
+def _chat_process_lock_timeout():
+    """Stop one wedged chat job from blocking every later reply forever."""
+    raw_value = os.environ.get("CHAT_PROCESS_LOCK_TIMEOUT", "45") or "45"
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        value = 45.0
+    return max(15.0, min(value, 120.0))
+
+
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
 
     # 构建跨聊天上下文（记忆互通的核心）
+    print(f"[TRACE] cross chat context start chat={chat_id}", flush=True)
     cross_chat = build_cross_chat_context(chat_id)
+    print(f"[TRACE] cross chat context end chat={chat_id}", flush=True)
     memory = _strip_action_artifacts(memory)
     cross_chat = _strip_action_artifacts(cross_chat)
 
     # 当前时间注入（让 bot 知道"今天是几号"）
     from datetime import datetime
     time_awareness = f"当前时间：{datetime.now(ZoneInfo(TIMEZONE)).strftime('%Y年%m月%d日 %H:%M')}（北京时间）"
+    print(f"[TRACE] identity hint start chat={chat_id}", flush=True)
     identity_hint = build_group_identity_hint(chat_id)
+    print(f"[TRACE] identity hint end chat={chat_id}", flush=True)
     # 主人在其他聊天的活跃情况：避免"你消失了好久"这种割裂发言（只在私聊/私密群注入，公开群不透露）
     if CECI_SEEN:
         _last_chat, _last_ts = max(CECI_SEEN.items(), key=lambda kv: kv[1])
@@ -1982,6 +1996,11 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
     def _run_api_with_deadline(api_base, api_key, api_format, models, label):
         result_box = {}
 
+        print(
+            f"[API] {label} start format={api_format} models={len(models)}",
+            flush=True,
+        )
+
         def _worker():
             try:
                 result_box["reply"] = _do_api_call(api_base, api_key, api_format, models)
@@ -1993,7 +2012,10 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
         hard_timeout = _model_api_hard_timeout()
         worker.join(timeout=hard_timeout)
         if worker.is_alive():
-            print(f"[API-WARN] {label} hard timeout after {hard_timeout:g}s; moving on")
+            print(
+                f"[API-WARN] {label} hard timeout after {hard_timeout:g}s; moving on",
+                flush=True,
+            )
             return None
         if result_box.get("error"):
             raise result_box["error"]
@@ -3664,18 +3686,51 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
+def _run_process_unlocked(chat_id, args):
+    """Run an observation-only job without occupying the reply lane."""
+    try:
+        process_message_background(*args)
+    except Exception as exc:
+        print(f"[PROCESS] observer error chat={chat_id}: {exc}", flush=True)
+
+
 def _run_chat_process(chat_id, process_lock, args):
-    """Run one chat job off-request while preserving per-chat serialization."""
-    with process_lock:
-        try:
-            process_message_background(*args)
-        except Exception as exc:
-            print(f"[PROCESS] worker error chat={chat_id}: {exc}")
+    """Serialize replies, but replace a stale lock instead of wedging the chat."""
+    acquired = process_lock.acquire(timeout=_chat_process_lock_timeout())
+    if not acquired:
+        with CHAT_PROCESS_LOCKS_GUARD:
+            current_lock = CHAT_PROCESS_LOCKS.get(chat_id)
+            if current_lock is process_lock:
+                current_lock = Lock()
+                CHAT_PROCESS_LOCKS[chat_id] = current_lock
+        process_lock = current_lock
+        acquired = bool(process_lock and process_lock.acquire(timeout=1.0))
+        print(
+            f"[PROCESS-WARN] stale chat lock replaced chat={chat_id} acquired={acquired}",
+            flush=True,
+        )
+    if not acquired:
+        return
+    try:
+        process_message_background(*args)
+    except Exception as exc:
+        print(f"[PROCESS] worker error chat={chat_id}: {exc}", flush=True)
+    finally:
+        process_lock.release()
 
 
 def enqueue_process_message(*args):
-    """Acknowledge Telegram quickly; process each chat serially in the background."""
+    """Acknowledge Telegram quickly without letting observers block replies."""
     chat_id = str(args[1])
+    should_reply = bool(args[4]) if len(args) > 4 else True
+    if not should_reply:
+        Thread(
+            target=_run_process_unlocked,
+            args=(chat_id, args),
+            daemon=True,
+        ).start()
+        print(f"[PROCESS] scheduled observer path chat={chat_id}", flush=True)
+        return
     with CHAT_PROCESS_LOCKS_GUARD:
         process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
     Thread(
@@ -3683,7 +3738,7 @@ def enqueue_process_message(*args):
         args=(chat_id, process_lock, args),
         daemon=True,
     ).start()
-    print(f"[PROCESS] scheduled background path chat={chat_id}")
+    print(f"[PROCESS] scheduled reply path chat={chat_id}", flush=True)
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
@@ -4219,5 +4274,6 @@ Thread(target=configure_deployment_webhook, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
