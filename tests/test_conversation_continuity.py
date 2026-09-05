@@ -143,6 +143,34 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertEqual(thread_cls.call_args.kwargs["args"][2], args)
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
 
+    def test_observer_job_does_not_take_the_reply_lock(self):
+        args = ("hello", "-100123", "friend", None, False)
+        fake_thread = mock.Mock()
+        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
+            bot.enqueue_process_message(*args)
+
+        fake_thread.start.assert_called_once_with()
+        self.assertIs(thread_cls.call_args.kwargs["target"], bot._run_process_unlocked)
+        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", args))
+        self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
+    def test_stale_reply_lock_is_replaced(self):
+        chat_id = "-100123"
+        stale_lock = bot.Lock()
+        stale_lock.acquire()
+        bot.CHAT_PROCESS_LOCKS[chat_id] = stale_lock
+        args = ("hello", chat_id, "friend", None, True)
+
+        try:
+            with mock.patch.object(bot, "_chat_process_lock_timeout", return_value=0.01):
+                with mock.patch.object(bot, "process_message_background") as process:
+                    bot._run_chat_process(chat_id, stale_lock, args)
+            process.assert_called_once_with(*args)
+            self.assertIsNot(bot.CHAT_PROCESS_LOCKS[chat_id], stale_lock)
+        finally:
+            stale_lock.release()
+            bot.CHAT_PROCESS_LOCKS.pop(chat_id, None)
+
     def test_visible_reply_does_not_restore_tagged_reasoning(self):
         raw = (
             "<reasoning>The user asks for a concise answer. I should reply in Chinese.</reasoning>\n"
@@ -372,5 +400,6 @@ class ConversationContinuityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
