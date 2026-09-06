@@ -23,6 +23,7 @@ import time
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
+from queue import Queue
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -60,8 +61,8 @@ PRIVATE_SAVE_INTERVAL = 30
 LAST_WEBHOOK_CHECK = 0
 PROCESSED_MESSAGES = set()
 PROCESSED_LOCK = Lock()
-CHAT_PROCESS_LOCKS = {}
-CHAT_PROCESS_LOCKS_GUARD = Lock()
+CHAT_PROCESS_QUEUES = {}
+CHAT_PROCESS_QUEUE_LOCK = Lock()
 WEBHOOK_CHECK_INTERVAL = 7200
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
@@ -1793,16 +1794,6 @@ def _model_api_hard_timeout():
     except (TypeError, ValueError):
         value = 20.0
     return max(8.0, min(value, 60.0))
-
-
-def _chat_process_lock_timeout():
-    """Stop one wedged chat job from blocking every later reply forever."""
-    raw_value = os.environ.get("CHAT_PROCESS_LOCK_TIMEOUT", "45") or "45"
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        value = 45.0
-    return max(15.0, min(value, 120.0))
 
 
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
@@ -3698,59 +3689,33 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
-def _run_process_unlocked(chat_id, args):
-    """Run an observation-only job without occupying the reply lane."""
-    try:
-        process_message_background(*args)
-    except Exception as exc:
-        print(f"[PROCESS] observer error chat={chat_id}: {exc}", flush=True)
-
-
-def _run_chat_process(chat_id, process_lock, args):
-    """Serialize replies, but replace a stale lock instead of wedging the chat."""
-    acquired = process_lock.acquire(timeout=_chat_process_lock_timeout())
-    if not acquired:
-        with CHAT_PROCESS_LOCKS_GUARD:
-            current_lock = CHAT_PROCESS_LOCKS.get(chat_id)
-            if current_lock is process_lock:
-                current_lock = Lock()
-                CHAT_PROCESS_LOCKS[chat_id] = current_lock
-        process_lock = current_lock
-        acquired = bool(process_lock and process_lock.acquire(timeout=1.0))
-        print(
-            f"[PROCESS-WARN] stale chat lock replaced chat={chat_id} acquired={acquired}",
-            flush=True,
-        )
-    if not acquired:
-        return
-    try:
-        process_message_background(*args)
-    except Exception as exc:
-        print(f"[PROCESS] worker error chat={chat_id}: {exc}", flush=True)
-    finally:
-        process_lock.release()
+def _chat_process_worker(chat_id, work_queue):
+    """Keep one durable FIFO worker per chat, matching the two healthy bots."""
+    while True:
+        args = work_queue.get()
+        try:
+            process_message_background(*args)
+        except Exception as exc:
+            print(f"[QUEUE] worker error chat={chat_id}: {exc}", flush=True)
+        finally:
+            work_queue.task_done()
 
 
 def enqueue_process_message(*args):
-    """Acknowledge Telegram quickly without letting observers block replies."""
+    """Serialize one bot's work per chat; different chats still run in parallel."""
     chat_id = str(args[1])
-    should_reply = bool(args[4]) if len(args) > 4 else True
-    if not should_reply:
-        Thread(
-            target=_run_process_unlocked,
-            args=(chat_id, args),
-            daemon=True,
-        ).start()
-        print(f"[PROCESS] scheduled observer path chat={chat_id}", flush=True)
-        return
-    with CHAT_PROCESS_LOCKS_GUARD:
-        process_lock = CHAT_PROCESS_LOCKS.setdefault(chat_id, Lock())
-    Thread(
-        target=_run_chat_process,
-        args=(chat_id, process_lock, args),
-        daemon=True,
-    ).start()
-    print(f"[PROCESS] scheduled reply path chat={chat_id}", flush=True)
+    with CHAT_PROCESS_QUEUE_LOCK:
+        work_queue = CHAT_PROCESS_QUEUES.get(chat_id)
+        if work_queue is None:
+            work_queue = Queue()
+            CHAT_PROCESS_QUEUES[chat_id] = work_queue
+            Thread(
+                target=_chat_process_worker,
+                args=(chat_id, work_queue),
+                daemon=True,
+            ).start()
+    work_queue.put(args)
+    print(f"[QUEUE] enqueued chat={chat_id} pending={work_queue.qsize()}", flush=True)
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============

@@ -132,27 +132,29 @@ class ConversationContinuityTest(unittest.TestCase):
     def test_enqueue_process_message_starts_background_worker(self):
         args = ("hello", "-100123")
         fake_thread = mock.Mock()
+        fake_queue = mock.Mock()
         with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
-            with mock.patch.object(bot, "process_message_background") as process:
+            with mock.patch.object(bot, "Queue", return_value=fake_queue):
+                bot.CHAT_PROCESS_QUEUES.pop("-100123", None)
                 bot.enqueue_process_message(*args)
 
-        process.assert_not_called()
         fake_thread.start.assert_called_once_with()
-        self.assertIs(thread_cls.call_args.kwargs["target"], bot._run_chat_process)
-        self.assertEqual(thread_cls.call_args.kwargs["args"][0], "-100123")
-        self.assertEqual(thread_cls.call_args.kwargs["args"][2], args)
+        self.assertIs(thread_cls.call_args.kwargs["target"], bot._chat_process_worker)
+        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", fake_queue))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+        fake_queue.put.assert_called_once_with(args)
 
-    def test_observer_job_does_not_take_the_reply_lock(self):
+    def test_observer_and_reply_share_the_same_ordered_chat_queue(self):
         args = ("hello", "-100123", "friend", None, False)
-        fake_thread = mock.Mock()
-        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
-            bot.enqueue_process_message(*args)
-
-        fake_thread.start.assert_called_once_with()
-        self.assertIs(thread_cls.call_args.kwargs["target"], bot._run_process_unlocked)
-        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", args))
-        self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+        fake_queue = mock.Mock()
+        bot.CHAT_PROCESS_QUEUES["-100123"] = fake_queue
+        try:
+            with mock.patch.object(bot, "Thread") as thread_cls:
+                bot.enqueue_process_message(*args)
+            thread_cls.assert_not_called()
+            fake_queue.put.assert_called_once_with(args)
+        finally:
+            bot.CHAT_PROCESS_QUEUES.pop("-100123", None)
 
     def test_typing_indicator_never_blocks_the_reply_path(self):
         fake_thread = mock.Mock()
@@ -165,23 +167,6 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertIs(thread_cls.call_args.kwargs["target"], bot._send_chat_action_worker)
         self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", "typing"))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
-
-    def test_stale_reply_lock_is_replaced(self):
-        chat_id = "-100123"
-        stale_lock = bot.Lock()
-        stale_lock.acquire()
-        bot.CHAT_PROCESS_LOCKS[chat_id] = stale_lock
-        args = ("hello", chat_id, "friend", None, True)
-
-        try:
-            with mock.patch.object(bot, "_chat_process_lock_timeout", return_value=0.01):
-                with mock.patch.object(bot, "process_message_background") as process:
-                    bot._run_chat_process(chat_id, stale_lock, args)
-            process.assert_called_once_with(*args)
-            self.assertIsNot(bot.CHAT_PROCESS_LOCKS[chat_id], stale_lock)
-        finally:
-            stale_lock.release()
-            bot.CHAT_PROCESS_LOCKS.pop(chat_id, None)
 
     def test_visible_reply_does_not_restore_tagged_reasoning(self):
         raw = (
