@@ -61,6 +61,10 @@ LAST_WEBHOOK_CHECK = 0
 PROCESSED_MESSAGES = set()
 PROCESSED_LOCK = Lock()
 WEBHOOK_CHECK_INTERVAL = 7200
+OUTBOUND_TIMEOUT_LOCK = Lock()
+OUTBOUND_HARD_TIMEOUTS = []
+OUTBOUND_TIMEOUT_WINDOW = 180
+WORKER_RECYCLE_SCHEDULED = False
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
 COT_ENABLED_RAW = os.environ.get("SHOW_COT", "").lower()
@@ -1835,6 +1839,41 @@ def _model_api_hard_timeout():
     return max(8.0, min(value, 60.0))
 
 
+def _recycle_current_worker(reason):
+    """Exit a poisoned Render worker so Gunicorn can replace it cleanly."""
+    time.sleep(0.5)
+    print(f"[SELF-HEAL] recycling worker: {reason}", flush=True)
+    if str(os.environ.get("RENDER", "")).lower() == "true" or os.environ.get("RENDER_SERVICE_ID"):
+        os._exit(70)
+
+
+def _schedule_worker_recycle(reason):
+    global WORKER_RECYCLE_SCHEDULED
+    with OUTBOUND_TIMEOUT_LOCK:
+        if WORKER_RECYCLE_SCHEDULED:
+            return
+        WORKER_RECYCLE_SCHEDULED = True
+    Thread(target=_recycle_current_worker, args=(reason,), daemon=True).start()
+
+
+def _record_outbound_hard_timeout(channel, now=None):
+    """Recycle only when independent model and Telegram routes both hard-stall."""
+    timestamp = time.time() if now is None else float(now)
+    should_recycle = False
+    with OUTBOUND_TIMEOUT_LOCK:
+        OUTBOUND_HARD_TIMEOUTS.append((timestamp, str(channel)))
+        cutoff = timestamp - OUTBOUND_TIMEOUT_WINDOW
+        OUTBOUND_HARD_TIMEOUTS[:] = [
+            item for item in OUTBOUND_HARD_TIMEOUTS if item[0] >= cutoff
+        ]
+        channels = {item[1] for item in OUTBOUND_HARD_TIMEOUTS}
+        should_recycle = "model" in channels and "telegram" in channels
+    if should_recycle:
+        _schedule_worker_recycle(
+            "model and Telegram outbound calls hard-timed-out in the same window"
+        )
+
+
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
@@ -2046,6 +2085,7 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 f"[API-WARN] {label} hard timeout after {hard_timeout:g}s; moving on",
                 flush=True,
             )
+            _record_outbound_hard_timeout("model")
             return None
         if result_box.get("error"):
             raise result_box["error"]
@@ -2404,6 +2444,7 @@ def send_telegram(chat_id, text, reply_to_message_id=None, reply_markup=None):
                     f"chars={len(text)}; queue released",
                     flush=True,
                 )
+                _record_outbound_hard_timeout("telegram")
                 return None
             if post_error is not None:
                 raise post_error
@@ -3047,9 +3088,6 @@ def start_proactive_background():
     if PROACTIVE_ENABLED and PROACTIVE_BACKGROUND_ENABLED and PROACTIVE_CHAT_IDS:
         PROACTIVE_BACKGROUND_STARTED = True
         Thread(target=proactive_background_loop, daemon=True).start()
-
-
-start_proactive_background()
 
 
 ACTION_DEDUP = {}
@@ -4309,12 +4347,35 @@ def health():
     return "alive"
 
 
-Thread(target=configure_deployment_webhook, daemon=True).start()
-if _deployment_webhook_base_url() and not _is_standby_runtime():
-    Thread(target=webhook_ownership_watchdog, daemon=True).start()
+RUNTIME_TASKS_LOCK = Lock()
+RUNTIME_TASKS_STARTED_PID = None
+
+
+def start_runtime_background_tasks():
+    """Start process-local jobs exactly once, and never from Gunicorn's master."""
+    global RUNTIME_TASKS_STARTED_PID
+    current_pid = os.getpid()
+    with RUNTIME_TASKS_LOCK:
+        if RUNTIME_TASKS_STARTED_PID == current_pid:
+            return False
+        RUNTIME_TASKS_STARTED_PID = current_pid
+
+    start_proactive_background()
+    Thread(target=configure_deployment_webhook, daemon=True).start()
+    if _deployment_webhook_base_url() and not _is_standby_runtime():
+        Thread(target=webhook_ownership_watchdog, daemon=True).start()
+    print(f"[RUNTIME] background tasks started pid={current_pid}", flush=True)
+    return True
+
+
+@app.before_request
+def _ensure_worker_background_tasks():
+    # Fallback for non-Gunicorn WSGI hosts; the PID guard makes this idempotent.
+    start_runtime_background_tasks()
 
 
 if __name__ == "__main__":
+    start_runtime_background_tasks()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 

@@ -71,6 +71,45 @@ class ConversationContinuityTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "999"}):
             self.assertEqual(bot._model_api_hard_timeout(), 60.0)
 
+    def test_worker_recycle_requires_model_and_telegram_hard_timeouts(self):
+        bot.OUTBOUND_HARD_TIMEOUTS.clear()
+        with mock.patch.object(bot, "_schedule_worker_recycle") as recycle:
+            bot._record_outbound_hard_timeout("model", now=1000)
+            recycle.assert_not_called()
+            bot._record_outbound_hard_timeout("telegram", now=1010)
+
+        recycle.assert_called_once_with(
+            "model and Telegram outbound calls hard-timed-out in the same window"
+        )
+
+    def test_old_timeout_does_not_trigger_worker_recycle(self):
+        bot.OUTBOUND_HARD_TIMEOUTS.clear()
+        with mock.patch.object(bot, "_schedule_worker_recycle") as recycle:
+            bot._record_outbound_hard_timeout("model", now=1000)
+            bot._record_outbound_hard_timeout("telegram", now=1300)
+
+        recycle.assert_not_called()
+
+    def test_runtime_background_tasks_start_once_per_process(self):
+        old_pid = bot.RUNTIME_TASKS_STARTED_PID
+        bot.RUNTIME_TASKS_STARTED_PID = None
+        first = mock.Mock()
+        second = mock.Mock()
+        try:
+            with mock.patch.object(bot.os, "getpid", return_value=1234), \
+                    mock.patch.object(bot, "start_proactive_background"), \
+                    mock.patch.object(bot, "Thread", side_effect=[first, second]) as thread_cls, \
+                    mock.patch.object(bot, "_deployment_webhook_base_url", return_value="https://example.com"), \
+                    mock.patch.object(bot, "_is_standby_runtime", return_value=False):
+                self.assertTrue(bot.start_runtime_background_tasks())
+                self.assertFalse(bot.start_runtime_background_tasks())
+
+            self.assertEqual(thread_cls.call_count, 2)
+            first.start.assert_called_once_with()
+            second.start.assert_called_once_with()
+        finally:
+            bot.RUNTIME_TASKS_STARTED_PID = old_pid
+
     def test_disabled_memory_recall_never_starts_hub_network_call(self):
         with mock.patch.object(bot, "MEMORY_RECALL_ENABLED", False), \
                 mock.patch.object(bot, "_hub_get_context_network") as network_call:
@@ -193,7 +232,8 @@ class ConversationContinuityTest(unittest.TestCase):
     def test_stuck_telegram_send_releases_the_chat_queue(self):
         fake_thread = mock.Mock()
         fake_thread.is_alive.return_value = True
-        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
+        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls, \
+                mock.patch.object(bot, "_record_outbound_hard_timeout") as record_timeout:
             response, timed_out, error = bot._telegram_post_with_deadline(
                 "https://api.telegram.org/test",
                 {"chat_id": "-100123", "text": "hello"},
@@ -205,6 +245,7 @@ class ConversationContinuityTest(unittest.TestCase):
         fake_thread.start.assert_called_once_with()
         fake_thread.join.assert_called_once_with(timeout=8)
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+        record_timeout.assert_not_called()
 
     def test_visible_reply_does_not_restore_tagged_reasoning(self):
         raw = (
