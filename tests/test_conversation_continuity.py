@@ -132,29 +132,23 @@ class ConversationContinuityTest(unittest.TestCase):
     def test_enqueue_process_message_starts_background_worker(self):
         args = ("hello", "-100123")
         fake_thread = mock.Mock()
-        fake_queue = mock.Mock()
         with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
-            with mock.patch.object(bot, "Queue", return_value=fake_queue):
-                bot.CHAT_PROCESS_QUEUES.pop("-100123", None)
-                bot.enqueue_process_message(*args)
+            bot.enqueue_process_message(*args)
 
         fake_thread.start.assert_called_once_with()
-        self.assertIs(thread_cls.call_args.kwargs["target"], bot._chat_process_worker)
-        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", fake_queue))
+        self.assertIs(thread_cls.call_args.kwargs["target"], bot._run_process_job)
+        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", args))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
-        fake_queue.put.assert_called_once_with(args)
 
-    def test_observer_and_reply_share_the_same_ordered_chat_queue(self):
-        args = ("hello", "-100123", "friend", None, False)
-        fake_queue = mock.Mock()
-        bot.CHAT_PROCESS_QUEUES["-100123"] = fake_queue
-        try:
-            with mock.patch.object(bot, "Thread") as thread_cls:
-                bot.enqueue_process_message(*args)
-            thread_cls.assert_not_called()
-            fake_queue.put.assert_called_once_with(args)
-        finally:
-            bot.CHAT_PROCESS_QUEUES.pop("-100123", None)
+    def test_later_message_does_not_wait_for_an_older_job(self):
+        first_thread = mock.Mock()
+        second_thread = mock.Mock()
+        with mock.patch.object(bot, "Thread", side_effect=[first_thread, second_thread]):
+            bot.enqueue_process_message("first", "-100123")
+            bot.enqueue_process_message("second", "-100123")
+
+        first_thread.start.assert_called_once_with()
+        second_thread.start.assert_called_once_with()
 
     def test_typing_indicator_never_blocks_the_reply_path(self):
         fake_thread = mock.Mock()

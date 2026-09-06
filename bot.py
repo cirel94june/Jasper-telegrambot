@@ -23,7 +23,6 @@ import time
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
-from queue import Queue
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -61,8 +60,6 @@ PRIVATE_SAVE_INTERVAL = 30
 LAST_WEBHOOK_CHECK = 0
 PROCESSED_MESSAGES = set()
 PROCESSED_LOCK = Lock()
-CHAT_PROCESS_QUEUES = {}
-CHAT_PROCESS_QUEUE_LOCK = Lock()
 WEBHOOK_CHECK_INTERVAL = 7200
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
@@ -3723,33 +3720,23 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             pass
 
 
-def _chat_process_worker(chat_id, work_queue):
-    """Keep one durable FIFO worker per chat, matching the two healthy bots."""
-    while True:
-        args = work_queue.get()
-        try:
-            process_message_background(*args)
-        except Exception as exc:
-            print(f"[QUEUE] worker error chat={chat_id}: {exc}", flush=True)
-        finally:
-            work_queue.task_done()
+def _run_process_job(chat_id, args):
+    """Run one update independently so an abandoned request cannot block later updates."""
+    try:
+        process_message_background(*args)
+    except Exception as exc:
+        print(f"[PROCESS] worker error chat={chat_id}: {exc}", flush=True)
 
 
 def enqueue_process_message(*args):
-    """Serialize one bot's work per chat; different chats still run in parallel."""
+    """Acknowledge Telegram immediately and isolate every update from stale work."""
     chat_id = str(args[1])
-    with CHAT_PROCESS_QUEUE_LOCK:
-        work_queue = CHAT_PROCESS_QUEUES.get(chat_id)
-        if work_queue is None:
-            work_queue = Queue()
-            CHAT_PROCESS_QUEUES[chat_id] = work_queue
-            Thread(
-                target=_chat_process_worker,
-                args=(chat_id, work_queue),
-                daemon=True,
-            ).start()
-    work_queue.put(args)
-    print(f"[QUEUE] enqueued chat={chat_id} pending={work_queue.qsize()}", flush=True)
+    Thread(
+        target=_run_process_job,
+        args=(chat_id, args),
+        daemon=True,
+    ).start()
+    print(f"[PROCESS] scheduled isolated job chat={chat_id}", flush=True)
 
 
 # ============ 消息合并：几秒内连发的多条消息当一条处理 ============
