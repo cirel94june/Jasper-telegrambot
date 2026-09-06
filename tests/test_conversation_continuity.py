@@ -168,6 +168,22 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", "typing"))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
 
+    def test_stuck_telegram_send_releases_the_chat_queue(self):
+        fake_thread = mock.Mock()
+        fake_thread.is_alive.return_value = True
+        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
+            response, timed_out, error = bot._telegram_post_with_deadline(
+                "https://api.telegram.org/test",
+                {"chat_id": "-100123", "text": "hello"},
+            )
+
+        self.assertIsNone(response)
+        self.assertTrue(timed_out)
+        self.assertIsNone(error)
+        fake_thread.start.assert_called_once_with()
+        fake_thread.join.assert_called_once_with(timeout=8)
+        self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
     def test_visible_reply_does_not_restore_tagged_reasoning(self):
         raw = (
             "<reasoning>The user asks for a concise answer. I should reply in Chinese.</reasoning>\n"

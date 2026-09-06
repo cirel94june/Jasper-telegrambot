@@ -2303,6 +2303,28 @@ def send_reaction(chat_id, message_id, text=""):
         print(f"[ERROR] 点表情失败: {e}")
 
 
+def _telegram_post_with_deadline(url, payload):
+    """Never let a stuck Telegram socket permanently occupy a chat queue."""
+    result_box = {}
+
+    def _worker():
+        try:
+            result_box["response"] = requests.post(
+                url,
+                json=payload,
+                timeout=(3, 6),
+            )
+        except Exception as exc:
+            result_box["error"] = exc
+
+    worker = Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout=8)
+    if worker.is_alive():
+        return None, True, None
+    return result_box.get("response"), False, result_box.get("error")
+
+
 def send_telegram(chat_id, text, reply_to_message_id=None, reply_markup=None):
     """发送单条消息；检查 Telegram 返回值，并按 Markdown/引用失败逐级降级。"""
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -2336,28 +2358,40 @@ def send_telegram(chat_id, text, reply_to_message_id=None, reply_markup=None):
             continue
         seen_payloads.add(payload_key)
         try:
-            resp = requests.post(url, json=payload, timeout=15)
+            resp, hard_timed_out, post_error = _telegram_post_with_deadline(url, payload)
+            if hard_timed_out:
+                print(
+                    f"[TG-SEND] hard timeout(8s) chat={chat_id} mode={label} "
+                    f"chars={len(text)}; queue released",
+                    flush=True,
+                )
+                return None
+            if post_error is not None:
+                raise post_error
+            if resp is None:
+                raise RuntimeError("Telegram request ended without a response")
             try:
                 result = resp.json()
             except Exception:
                 print(f"[TG-SEND] Telegram返回非JSON chat={chat_id} mode={label} "
-                      f"http={resp.status_code} body={resp.text[:200]!r}")
+                      f"http={resp.status_code} body={resp.text[:200]!r}", flush=True)
                 continue
             if result.get("ok"):
                 sent = result.get("result")
                 print(f"[TG-SEND] 成功 chat={chat_id} mode={label} "
-                      f"message_id={(sent or {}).get('message_id')} chars={len(text)}")
+                      f"message_id={(sent or {}).get('message_id')} chars={len(text)}", flush=True)
                 return sent
             print(f"[TG-SEND] 失败 chat={chat_id} mode={label} http={resp.status_code} "
-                  f"error_code={result.get('error_code')} desc={result.get('description', '')[:240]}")
+                  f"error_code={result.get('error_code')} desc={result.get('description', '')[:240]}",
+                  flush=True)
         except requests.exceptions.Timeout:
             # 超时不自动重发：请求可能已被 Telegram 接收，重发会造成重复消息。
-            print(f"[TG-SEND] 超时(15s) chat={chat_id} mode={label} chars={len(text)}；不重发避免重复")
+            print(f"[TG-SEND] 超时 chat={chat_id} mode={label} chars={len(text)}；不重发避免重复", flush=True)
             return None
         except Exception as e:
-            print(f"[TG-SEND] 异常 chat={chat_id} mode={label}: {type(e).__name__}: {e}")
+            print(f"[TG-SEND] 异常 chat={chat_id} mode={label}: {type(e).__name__}: {e}", flush=True)
 
-    print(f"[TG-SEND] 所有发送方式均失败 chat={chat_id} chars={len(text)} preview={text[:80]!r}")
+    print(f"[TG-SEND] 所有发送方式均失败 chat={chat_id} chars={len(text)} preview={text[:80]!r}", flush=True)
     return None
 
 
