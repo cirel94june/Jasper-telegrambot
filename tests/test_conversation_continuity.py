@@ -35,6 +35,34 @@ class ConversationContinuityTest(unittest.TestCase):
         }):
             self.assertFalse(bot._is_standby_runtime())
 
+    def test_webhook_owner_is_reclaimed_when_another_runtime_replaces_it(self):
+        info_response = mock.Mock()
+        info_response.json.return_value = {
+            "result": {"url": "https://jasper-telegrambot.fly.dev/webhook"}
+        }
+        with mock.patch.dict(os.environ, {
+            "FLY_APP_NAME": "",
+            "PUBLIC_WEBHOOK_BASE_URL": "https://jasper-telegrambot.onrender.com",
+        }), mock.patch.object(bot.requests, "get", return_value=info_response), \
+                mock.patch.object(bot, "configure_deployment_webhook") as configure:
+            self.assertFalse(bot.ensure_webhook_ownership_once())
+
+        configure.assert_called_once_with()
+
+    def test_webhook_owner_is_left_alone_when_it_is_already_correct(self):
+        info_response = mock.Mock()
+        info_response.json.return_value = {
+            "result": {"url": "https://jasper-telegrambot.onrender.com/webhook"}
+        }
+        with mock.patch.dict(os.environ, {
+            "FLY_APP_NAME": "",
+            "PUBLIC_WEBHOOK_BASE_URL": "https://jasper-telegrambot.onrender.com",
+        }), mock.patch.object(bot.requests, "get", return_value=info_response), \
+                mock.patch.object(bot, "configure_deployment_webhook") as configure:
+            self.assertTrue(bot.ensure_webhook_ownership_once())
+
+        configure.assert_not_called()
+
     def test_model_api_hard_timeout_is_bounded(self):
         with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": ""}):
             self.assertEqual(bot._model_api_hard_timeout(), 20.0)
@@ -407,6 +435,7 @@ class ConversationContinuityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
