@@ -22,7 +22,7 @@ import random
 import time
 from datetime import datetime
 from flask import Flask, request
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
@@ -2297,6 +2297,24 @@ def send_chat_action(chat_id, action="typing"):
         print(f"[ERROR] chat action worker 启动失败: {e}", flush=True)
 
 
+def _typing_indicator_loop(chat_id, stop_event):
+    """Keep Telegram's short-lived typing indicator visible until the reply is ready."""
+    while not stop_event.is_set():
+        _send_chat_action_worker(chat_id, "typing")
+        if stop_event.wait(4):
+            break
+
+
+def start_typing_indicator(chat_id):
+    stop_event = Event()
+    Thread(
+        target=_typing_indicator_loop,
+        args=(chat_id, stop_event),
+        daemon=True,
+    ).start()
+    return stop_event
+
+
 def pick_reaction_emoji(text):
     if text:
         lowered = text.lower()
@@ -3616,20 +3634,23 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
 
         print(f"[TRACE] model call start chat={chat_id}")
         print(f"[DEBUG] Bot 被唤醒，调用 AI...")
-        send_chat_action(chat_id, "typing")
+        typing_stop = start_typing_indicator(chat_id)
 
         # Keep images format-neutral here; each API route converts them to its own protocol.
-        if image_b64:
-            api_text = formatted_input or "看看这张图"
-            imgs = image_b64 if isinstance(image_b64, list) else [(image_b64, image_mime or "image/jpeg")]
-            user_content = [
-                {"type": "_bot_image", "media_type": mime or "image/jpeg", "data": b64_data}
-                for b64_data, mime in imgs
-            ]
-            user_content.append({"type": "text", "text": api_text})
-            reply = call_claude(user_content, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
-        else:
-            reply = call_claude(formatted_input, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
+        try:
+            if image_b64:
+                api_text = formatted_input or "看看这张图"
+                imgs = image_b64 if isinstance(image_b64, list) else [(image_b64, image_mime or "image/jpeg")]
+                user_content = [
+                    {"type": "_bot_image", "media_type": mime or "image/jpeg", "data": b64_data}
+                    for b64_data, mime in imgs
+                ]
+                user_content.append({"type": "text", "text": api_text})
+                reply = call_claude(user_content, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
+            else:
+                reply = call_claude(formatted_input, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
+        finally:
+            typing_stop.set()
 
         print(f"[TRACE] model call end chat={chat_id} got_reply={bool(reply)}")
         if not reply:

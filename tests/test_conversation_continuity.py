@@ -199,6 +199,17 @@ class ConversationContinuityTest(unittest.TestCase):
         self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", "typing"))
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
 
+    def test_continuous_typing_indicator_runs_in_one_daemon_thread(self):
+        fake_thread = mock.Mock()
+        with mock.patch.object(bot, "Thread", return_value=fake_thread) as thread_cls:
+            stop_event = bot.start_typing_indicator("-100123")
+
+        self.assertIsInstance(stop_event, bot.Event)
+        fake_thread.start.assert_called_once_with()
+        self.assertIs(thread_cls.call_args.kwargs["target"], bot._typing_indicator_loop)
+        self.assertEqual(thread_cls.call_args.kwargs["args"], ("-100123", stop_event))
+        self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
     def test_stuck_telegram_send_releases_the_chat_queue(self):
         fake_thread = mock.Mock()
         fake_thread.is_alive.return_value = True
