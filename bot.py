@@ -625,48 +625,6 @@ def configure_deployment_webhook():
         print(f"[WEBHOOK-ERROR] registration failed: {e}", flush=True)
 
 
-def ensure_webhook_ownership_once():
-    """Reclaim Telegram delivery if another deployment replaced our webhook."""
-    public_base_url = _deployment_webhook_base_url()
-    if not public_base_url or _is_standby_runtime():
-        return False
-
-    expected_url = f"{public_base_url}/webhook"
-    try:
-        response = requests.get(
-            f"https://api.telegram.org/bot{TG_TOKEN}/getWebhookInfo",
-            timeout=(5, 10),
-        )
-        result = response.json().get("result", {})
-        current_url = str(result.get("url", "")).rstrip("/")
-        if current_url == expected_url.rstrip("/"):
-            return True
-
-        print(
-            f"[WEBHOOK-WARN] ownership changed to {current_url or '(empty)'}; "
-            f"reclaiming {expected_url}",
-            flush=True,
-        )
-        configure_deployment_webhook()
-        return False
-    except Exception as e:
-        print(f"[WEBHOOK-WARN] ownership check failed: {e}", flush=True)
-        return False
-
-
-def webhook_ownership_watchdog():
-    """Keep an old Fly deployment from silently stealing Telegram updates."""
-    raw_interval = os.environ.get("WEBHOOK_OWNERSHIP_CHECK_INTERVAL", "30") or "30"
-    try:
-        interval = min(300.0, max(15.0, float(raw_interval)))
-    except (TypeError, ValueError):
-        interval = 30.0
-
-    while True:
-        time.sleep(interval)
-        ensure_webhook_ownership_once()
-
-
 def fetch_memory(chat_id=""):
     if not MEMORY_URL or not GIST_TOKEN:
         return f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。"
@@ -4362,8 +4320,6 @@ def start_runtime_background_tasks():
 
     start_proactive_background()
     Thread(target=configure_deployment_webhook, daemon=True).start()
-    if _deployment_webhook_base_url() and not _is_standby_runtime():
-        Thread(target=webhook_ownership_watchdog, daemon=True).start()
     print(f"[RUNTIME] background tasks started pid={current_pid}", flush=True)
     return True
 
