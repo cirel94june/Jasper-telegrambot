@@ -16,6 +16,27 @@ import bot
 
 
 class ConversationContinuityTest(unittest.TestCase):
+    def test_webhook_backlog_is_never_dropped(self):
+        old_check = bot.LAST_WEBHOOK_CHECK
+        bot.LAST_WEBHOOK_CHECK = 0
+        response = mock.Mock()
+        response.json.return_value = {
+            "result": {
+                "pending_update_count": 23,
+                "last_error_date": 1000,
+                "url": "https://example.com/webhook",
+            }
+        }
+        try:
+            with mock.patch.object(bot.time, "time", return_value=1100), \
+                    mock.patch.object(bot.requests, "get", return_value=response) as request_get:
+                bot.self_heal_webhook()
+        finally:
+            bot.LAST_WEBHOOK_CHECK = old_check
+
+        request_get.assert_called_once()
+        self.assertIn("getWebhookInfo", request_get.call_args.args[0])
+
     def test_fly_runtime_defers_webhook_ownership_to_render(self):
         with mock.patch.dict(os.environ, {
             "FLY_APP_NAME": "jasper-telegrambot",
