@@ -2043,6 +2043,54 @@ def _record_outbound_hard_timeout(channel, now=None):
         )
 
 
+def _visible_text_from_content(content):
+    """Extract only user-visible text from string or structured content blocks."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return ""
+
+    visible = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").lower()
+        if block_type not in ("text", "output_text"):
+            continue
+        value = block.get("text")
+        if isinstance(value, dict):
+            value = value.get("value")
+        if isinstance(value, str) and value.strip():
+            visible.append(value.strip())
+    return "\n".join(visible).strip()
+
+
+def _extract_api_visible_text(result):
+    """Normalize Anthropic/OpenAI-compatible replies without exposing reasoning fields."""
+    if not isinstance(result, dict):
+        return ""
+    text = _visible_text_from_content(result.get("content"))
+    if text:
+        return text
+    choices = result.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            text = _visible_text_from_content(message.get("content"))
+            if text:
+                return text
+        text = choice.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
+
+
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
@@ -2217,14 +2265,7 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 if _result_blocked(result):
                     print(f"[WARN] 模型 {model} 被安全拦截，换下一个")
                     continue
-                text = None
-                if isinstance(result.get("content"), list):
-                    for block in result["content"]:
-                        if block.get("type") == "text":
-                            text = block["text"]
-                            break
-                elif result.get("choices"):
-                    text = (result["choices"][0].get("message") or {}).get("content")
+                text = _extract_api_visible_text(result)
                 if text and str(text).strip():
                     print(f"[API] 模型成功: {model}")
                     return re.sub(r'\n{2,}', '\n', str(text).strip())
@@ -2304,7 +2345,7 @@ def _should_show_cot(chat_id):
 def _strip_reasoning_sections(text):
     """Strip common proxy/model reasoning envelopes while retaining final text."""
     cleaned = str(text or "")
-    reasoning_names = r"analysis|reasoning|thoughts?|internal[_ -]?monologue|scratchpad"
+    reasoning_names = r"analysis|reasoning|think(?:ing)?|thoughts?|internal[_ -]?monologue|scratchpad"
 
     cleaned = re.sub(
         rf'(?is)<\|(?:{reasoning_names})\|>.*?(?=<\|(?:final|answer|response)\|>|$)',
@@ -2333,6 +2374,7 @@ def _strip_reasoning_sections(text):
         r'^\s*(?:#{1,6}\s*)?(?:final(?: answer| response)?|answer|response|最终回答|最终回复|回复|答复)\s*[:：]\s*(.*)$',
         re.IGNORECASE,
     )
+    has_explicit_final = any(final_header.match(line) for line in cleaned.splitlines())
     result = []
     in_reasoning = False
     saw_gap = False
@@ -2353,7 +2395,7 @@ def _strip_reasoning_sections(text):
             if not line.strip():
                 saw_gap = True
                 continue
-            if saw_gap:
+            if saw_gap and not has_explicit_final:
                 # A plain paragraph after a gap is normally the visible answer.
                 in_reasoning = False
                 saw_gap = False

@@ -343,6 +343,45 @@ class ConversationContinuityTest(unittest.TestCase):
 
         self.assertEqual(bot._sanitize_model_visible_reply(raw), "最终回答")
 
+    def test_api_parser_ignores_structured_reasoning_blocks(self):
+        anthropic = {
+            "content": [
+                {"type": "thinking", "thinking": "PRIVATE_MARKER"},
+                {"type": "text", "text": "可见回答"},
+            ]
+        }
+        openai = {
+            "choices": [{
+                "message": {
+                    "reasoning_content": "PRIVATE_MARKER",
+                    "content": [
+                        {"type": "reasoning", "text": "PRIVATE_MARKER"},
+                        {"type": "text", "text": "可见回答"},
+                    ],
+                }
+            }]
+        }
+
+        self.assertEqual(bot._extract_api_visible_text(anthropic), "可见回答")
+        self.assertEqual(bot._extract_api_visible_text(openai), "可见回答")
+
+    def test_explicit_final_keeps_reasoning_hidden_across_blank_lines(self):
+        raw = "Analysis: draft\n\nPRIVATE_MARKER\nFinal: 可见回答"
+        self.assertEqual(bot._sanitize_model_visible_reply(raw), "可见回答")
+
+    def test_history_removes_think_tags_from_agent_output(self):
+        history = [bot._make_conversation_event(
+            role="assistant",
+            content="<think>PRIVATE_MARKER</think>可见回答",
+            raw_text="<think>PRIVATE_MARKER</think>可见回答",
+            chat_id="-100123",
+            sender_type="agent",
+            stable_sender_id="jasper",
+        )]
+        serialized = json.dumps(bot.build_model_messages(history), ensure_ascii=False)
+        self.assertIn("可见回答", serialized)
+        self.assertNotIn("PRIVATE_MARKER", serialized)
+
     def test_cot_display_requires_explicit_opt_in(self):
         with mock.patch.object(bot, "COT_ENABLED", False):
             self.assertFalse(bot._should_show_cot("8749953218"))
