@@ -15,6 +15,7 @@
 import os
 import re
 import json
+import copy
 import base64
 import tempfile
 import requests
@@ -1979,6 +1980,12 @@ def build_model_messages(history, history_limit=50):
         speaker_label = _model_speaker_label(event, speaker, current_agent)
         raw_text = event.get("raw_text")
         body = raw_text if raw_text not in (None, "") else event.get("content", "")
+        # Clean our own stored output, never reinterpret a human's quoted code.
+        if role == "assistant" and speaker == current_agent:
+            body = _sanitize_model_visible_reply(str(body))
+        body = _strip_action_artifacts(body)
+        if not body:
+            continue
         if event.get("context_note"):
             body = f"{event['context_note']}\n{body}"
         entry_content = _strip_action_artifacts(f"{speaker_label}说{detail_text}：{body}")
@@ -2140,9 +2147,13 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
         print(f"[CONTEXT-DEBUG] chat={chat_id} agent={_current_agent_id()} "
               f"messages={json.dumps(messages, ensure_ascii=False)[:16000]}")
 
-    # 多模态：带图片时替换最后一条 user 消息
+    print(f"[CONTEXT] chat={chat_id} events={len(history[-history_limit:])} "
+          f"sources={[(e.get('telegram_message_id'), e.get('stable_sender_id')) for e in history[-history_limit:]]}",
+          flush=True)
+
+    # Preserve the preceding speakers merged into the final user message.
     if isinstance(user_content, list) and messages and messages[-1]["role"] == "user":
-        messages[-1]["content"] = user_content
+        messages[-1]["content"] = _attach_current_images(messages[-1]["content"], user_content)
 
     base = CLAUDE_URL.rstrip("/")
 
@@ -2277,6 +2288,12 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
 
     return None
 
+
+
+def _attach_current_images(dialogue, user_content):
+    return [block.copy() for block in user_content if block.get("type") == "_bot_image"] + [
+        {"type": "text", "text": dialogue}
+    ]
 
 
 def _should_show_cot(chat_id):
@@ -3820,6 +3837,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
             sender_display=display_name if str(chat_id).startswith("-") else sender_name,
             context_note=agent_reference_hint,
         ))
+            context_history = copy.deepcopy(history)
 
         # 旁听模式：只记录不回复（不读核心记忆，省API）
         if not should_reply:
@@ -3832,7 +3850,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
 
         # 只有要回复时才读核心记忆
         # 优先从 Memory Hub 获取记忆，失败则 fallback 到 Gist
-        recent_for_hub = build_model_messages(history, history_limit=5)
+        recent_for_hub = build_model_messages(context_history, history_limit=5)
         print(f"[TRACE] hub context start chat={chat_id}")
         hub_memory, recall_summary = hub_get_context(text, recent_messages=recent_for_hub, chat_id=chat_id, chat_type=chat_type)
         print(f"[TRACE] hub context end chat={chat_id} got_memory={bool(hub_memory)}")
@@ -3855,7 +3873,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         # Keep images format-neutral here; each API route converts them to its own protocol.
         try:
             if image_b64:
-                current_context = build_model_messages(history, history_limit=1)
+                current_context = build_model_messages(context_history, history_limit=1)
                 api_text = current_context[-1]["content"] if current_context else (history_text or "看看这张图")
                 imgs = image_b64 if isinstance(image_b64, list) else [(image_b64, image_mime or "image/jpeg")]
                 user_content = [
@@ -3863,9 +3881,9 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
                     for b64_data, mime in imgs
                 ]
                 user_content.append({"type": "text", "text": api_text})
-                reply = call_claude(user_content, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
+                reply = call_claude(user_content, memory, context_history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
             else:
-                reply = call_claude(formatted_input, memory, history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
+                reply = call_claude(formatted_input, memory, context_history, u_time, is_group=str(chat_id).startswith("-"), chat_id=chat_id)
         finally:
             typing_stop.set()
 
