@@ -2815,6 +2815,9 @@ def send_telegram_split(chat_id, text, reply_to_message_id=None, cot_text=""):
     if cot_text and _should_show_cot(chat_id):
         token = _cache_cot(chat_id, cot_text)
         cot_markup = {"inline_keyboard": [[{"text": "🧠 查看思路", "callback_data": f"cot:{token}"}]]}
+        print(f"[COT] button attached chat={chat_id} chars={len(cot_text)}")
+    elif cot_text:
+        print(f"[COT] captured but hidden for chat={chat_id} chars={len(cot_text)}")
 
     sent_messages = []
     for i, part in enumerate(parts):
@@ -4018,6 +4021,8 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         ).strip()
         if len(cot_text) > COT_MAX_CHARS:
             cot_text = cot_text[:COT_MAX_CHARS].rstrip() + "..."
+        if cot_text:
+            print(f"[COT] extracted chat={chat_id} chars={len(cot_text)}")
         # 清理其他可能的XML风格思维标签
         reply = re.sub(r'<[a-z_]+>.*?</[a-z_]+>', '', reply, flags=re.DOTALL).strip()
 
