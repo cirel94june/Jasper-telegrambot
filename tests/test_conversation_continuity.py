@@ -364,6 +364,38 @@ class ConversationContinuityTest(unittest.TestCase):
 
         self.assertEqual(bot._extract_api_visible_text(anthropic), "可见回答")
         self.assertEqual(bot._extract_api_visible_text(openai), "可见回答")
+        self.assertEqual(
+            bot._extract_api_reply_parts(anthropic),
+            ("可见回答", "PRIVATE_MARKER"),
+        )
+        self.assertEqual(
+            bot._extract_api_reply_parts(openai),
+            ("可见回答", "PRIVATE_MARKER"),
+        )
+
+    def test_structured_reasoning_gets_private_cot_button_only(self):
+        with mock.patch.object(bot, "COT_ENABLED", True):
+            with mock.patch.object(bot, "PRIVATE_CHATS", ["-100-private"]):
+                self.assertTrue(bot._should_show_cot("8749953218"))
+                self.assertTrue(bot._should_show_cot("-100-private"))
+                self.assertFalse(bot._should_show_cot("-100-public"))
+
+    def test_cot_button_reaches_private_telegram_payload_not_public_group(self):
+        sent = {"message_id": 1, "text": "可见回答"}
+        with mock.patch.object(bot, "COT_ENABLED", True):
+            with mock.patch.object(bot, "PRIVATE_CHATS", ["-100-private"]):
+                with mock.patch.object(bot, "split_into_short_messages", return_value=["可见回答"]):
+                    with mock.patch.object(bot, "send_telegram", return_value=sent) as sender:
+                        bot.send_telegram_split("-100-private", "可见回答", cot_text="内部思路")
+                        private_markup = sender.call_args.kwargs["reply_markup"]
+                        self.assertEqual(
+                            private_markup["inline_keyboard"][0][0]["text"],
+                            "🧠 查看思路",
+                        )
+
+                        sender.reset_mock()
+                        bot.send_telegram_split("-100-public", "可见回答", cot_text="内部思路")
+                        self.assertIsNone(sender.call_args.kwargs["reply_markup"])
 
     def test_explicit_final_keeps_reasoning_hidden_across_blank_lines(self):
         raw = "Analysis: draft\n\nPRIVATE_MARKER\nFinal: 可见回答"

@@ -68,8 +68,8 @@ OUTBOUND_TIMEOUT_WINDOW = 180
 WORKER_RECYCLE_SCHEDULED = False
 LAST_BIO_UPDATE = 0
 BIO_UPDATE_INTERVAL = int(os.environ.get("BIO_UPDATE_INTERVAL", "10800"))
-COT_ENABLED_RAW = os.environ.get("SHOW_COT", "").lower()
-# Never expose model reasoning by default. Operators must explicitly opt in.
+COT_ENABLED_RAW = os.environ.get("SHOW_COT", "true").lower()
+# Ceci opted in; public groups remain blocked by _should_show_cot().
 COT_ENABLED = COT_ENABLED_RAW in ("1", "true", "yes")
 COT_MAX_CHARS = int(os.environ.get("COT_MAX_CHARS", "1200"))
 COT_CACHE = {}
@@ -2067,28 +2067,65 @@ def _visible_text_from_content(content):
     return "\n".join(visible).strip()
 
 
+def _reasoning_text_from_content(content):
+    """Extract provider reasoning blocks without mixing them into visible text."""
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return ""
+
+    reasoning = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").lower()
+        if block_type not in ("thinking", "reasoning", "analysis"):
+            continue
+        value = (block.get("thinking") or block.get("reasoning")
+                 or block.get("analysis") or block.get("text") or block.get("content"))
+        if isinstance(value, dict):
+            value = value.get("value") or value.get("text")
+        if isinstance(value, str) and value.strip():
+            reasoning.append(value.strip())
+    return "\n".join(reasoning).strip()
+
+
+def _extract_api_reply_parts(result):
+    """Return visible text and separately transported provider reasoning."""
+    if not isinstance(result, dict):
+        return "", ""
+
+    text = _visible_text_from_content(result.get("content"))
+    reasoning = _reasoning_text_from_content(result.get("content"))
+    choices = result.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                if not text:
+                    text = _visible_text_from_content(message.get("content"))
+                if not reasoning:
+                    for key in ("reasoning_content", "reasoning", "thinking", "analysis"):
+                        value = message.get(key)
+                        if isinstance(value, str) and value.strip():
+                            reasoning = value.strip()
+                            break
+                    if not reasoning:
+                        reasoning = _reasoning_text_from_content(message.get("content"))
+            if not text:
+                legacy_text = choice.get("text")
+                if isinstance(legacy_text, str) and legacy_text.strip():
+                    text = legacy_text.strip()
+            if text:
+                break
+    return text, reasoning
+
+
 def _extract_api_visible_text(result):
     """Normalize Anthropic/OpenAI-compatible replies without exposing reasoning fields."""
-    if not isinstance(result, dict):
-        return ""
-    text = _visible_text_from_content(result.get("content"))
-    if text:
-        return text
-    choices = result.get("choices")
-    if not isinstance(choices, list):
-        return ""
-    for choice in choices:
-        if not isinstance(choice, dict):
-            continue
-        message = choice.get("message")
-        if isinstance(message, dict):
-            text = _visible_text_from_content(message.get("content"))
-            if text:
-                return text
-        text = choice.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-    return ""
+    return _extract_api_reply_parts(result)[0]
 
 
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
@@ -2265,10 +2302,15 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 if _result_blocked(result):
                     print(f"[WARN] 模型 {model} 被安全拦截，换下一个")
                     continue
-                text = _extract_api_visible_text(result)
+                text, cot_text = _extract_api_reply_parts(result)
                 if text and str(text).strip():
                     print(f"[API] 模型成功: {model}")
-                    return re.sub(r'\n{2,}', '\n', str(text).strip())
+                    if "gemini" in str(model).lower():
+                        cot_text = ""
+                    return {
+                        "text": re.sub(r'\n{2,}', '\n', str(text).strip()),
+                        "cot": str(cot_text or "").strip(),
+                    }
                 print(f"[ERROR] API 无可用文本: HTTP {resp.status_code} model={model}, body={str(result)[:200]}")
             except requests.exceptions.Timeout:
                 print(f"[WARN] 模型 {model} 超时，换下一个")
@@ -2311,7 +2353,10 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
             CLAUDE_URL, CLAUDE_KEY, API_FORMAT, CLAUDE_MODELS, "primary"
         )
         if reply:
-            return _hub_process_capabilities(reply)
+            return {
+                "text": _hub_process_capabilities(reply.get("text", "")),
+                "cot": reply.get("cot", ""),
+            }
     except Exception as e:
         print(f"[WARN] 主API失败: {e}")
 
@@ -2323,7 +2368,10 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 BACKUP_BASE_URL, BACKUP_API_KEY, BACKUP_API_FORMAT, BACKUP_MODELS, "backup"
             )
             if reply:
-                return _hub_process_capabilities(reply)
+                return {
+                    "text": _hub_process_capabilities(reply.get("text", "")),
+                    "cot": reply.get("cot", ""),
+                }
         except Exception as e:
             print(f"[ERROR] 备用API也失败: {e}")
 
@@ -3938,6 +3986,10 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
         finally:
             typing_stop.set()
 
+        model_cot_text = ""
+        if isinstance(reply, dict):
+            model_cot_text = str(reply.get("cot") or "").strip()
+            reply = reply.get("text")
         print(f"[TRACE] model call end chat={chat_id} got_reply={bool(reply)}")
         if not reply:
             send_telegram(chat_id, "😵 短路了，稍后再试")
@@ -3960,7 +4012,12 @@ def process_message_background(text, chat_id, sender_name, msg_date=None,
                     continue
                 kept_lines.append(line)
             reply = '\n'.join(kept_lines).strip()
-        reply, cot_text = extract_thinking(reply)
+        reply, inline_cot_text = extract_thinking(reply)
+        cot_text = "\n\n".join(
+            part for part in (model_cot_text, inline_cot_text) if part
+        ).strip()
+        if len(cot_text) > COT_MAX_CHARS:
+            cot_text = cot_text[:COT_MAX_CHARS].rstrip() + "..."
         # 清理其他可能的XML风格思维标签
         reply = re.sub(r'<[a-z_]+>.*?</[a-z_]+>', '', reply, flags=re.DOTALL).strip()
 
