@@ -72,6 +72,7 @@ COT_ENABLED_RAW = os.environ.get("SHOW_COT", "true").lower()
 # Ceci opted in; public groups remain blocked by _should_show_cot().
 COT_ENABLED = COT_ENABLED_RAW in ("1", "true", "yes")
 COT_MAX_CHARS = int(os.environ.get("COT_MAX_CHARS", "1200"))
+SHOW_GEMINI_COT = os.environ.get("SHOW_GEMINI_COT", "false").lower() in ("1", "true", "yes")
 COT_CACHE = {}
 COT_CACHE_TTL = 1800
 
@@ -2136,6 +2137,13 @@ def _extract_api_visible_text(result):
     return _extract_api_reply_parts(result)[0]
 
 
+def _reasoning_for_display(model, reasoning):
+    """Keep Gemini reasoning opt-in because those relays can return very long traces."""
+    if "gemini" in str(model or "").lower() and not SHOW_GEMINI_COT:
+        return ""
+    return str(reasoning or "").strip()
+
+
 def call_claude(user_content, memory, history, current_user_time, is_group=False, chat_id=""):
     """调用 AI API，支持 Anthropic 和 OpenAI 两种格式"""
     is_private_group = str(chat_id) in PRIVATE_CHATS
@@ -2313,8 +2321,7 @@ def call_claude(user_content, memory, history, current_user_time, is_group=False
                 text, cot_text = _extract_api_reply_parts(result)
                 if text and str(text).strip():
                     print(f"[API] 模型成功: {model}")
-                    if "gemini" in str(model).lower():
-                        cot_text = ""
+                    cot_text = _reasoning_for_display(model, cot_text)
                     return {
                         "text": re.sub(r'\n{2,}', '\n', str(text).strip()),
                         "cot": str(cot_text or "").strip(),

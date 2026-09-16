@@ -55,6 +55,9 @@ Jasper（狗蛋）的 Telegram bot，和小克/Lucien 共用同一套代码架�
 | 变量 | 说明 |
 |------|------|
 | `API_FORMAT` | `openai` 或 `anthropic`，默认 openai |
+| `SHOW_COT` | 私聊和 `PRIVATE_CHATS` 中显示“查看思路”按钮，默认 `true` |
+| `SHOW_GEMINI_COT` | 允许显示 Gemini 中转已经返回的思路，默认 `false` |
+| `COT_MAX_CHARS` | 单次可展开思路的最大字符数，默认 `1200` |
 | `GIST_ID` | GitHub Gist ID（聊天历史持久化） |
 | `GIST_TOKEN` | GitHub Token |
 | `VISION_MODEL` | 图片识别模型 |

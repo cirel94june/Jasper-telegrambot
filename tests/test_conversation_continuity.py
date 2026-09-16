@@ -373,6 +373,13 @@ class ConversationContinuityTest(unittest.TestCase):
             ("可见回答", "PRIVATE_MARKER"),
         )
 
+    def test_gemini_reasoning_requires_explicit_opt_in(self):
+        with mock.patch.object(bot, "SHOW_GEMINI_COT", False):
+            self.assertEqual(bot._reasoning_for_display("gemini-3-flash", "思路"), "")
+        with mock.patch.object(bot, "SHOW_GEMINI_COT", True):
+            self.assertEqual(bot._reasoning_for_display("gemini-3-flash", "思路"), "思路")
+        self.assertEqual(bot._reasoning_for_display("gpt-5.5", "思路"), "思路")
+
     def test_structured_reasoning_gets_private_cot_button_only(self):
         with mock.patch.object(bot, "COT_ENABLED", True):
             with mock.patch.object(bot, "PRIVATE_CHATS", ["-100-private"]):
