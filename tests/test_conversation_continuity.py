@@ -76,7 +76,12 @@ class ConversationContinuityTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "2"}):
             self.assertEqual(bot._model_api_hard_timeout(), 8.0)
         with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "999"}):
-            self.assertEqual(bot._model_api_hard_timeout(), 60.0)
+            self.assertEqual(bot._model_api_hard_timeout(), 30.0)
+        for value in ("nan", "inf"):
+            with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": value}):
+                self.assertEqual(bot._model_api_hard_timeout(), 30.0)
+        with mock.patch.dict(os.environ, {"MODEL_API_HARD_TIMEOUT": "invalid"}):
+            self.assertEqual(bot._model_api_hard_timeout(), 20.0)
 
     def test_worker_recycle_requires_model_and_telegram_hard_timeouts(self):
         bot.OUTBOUND_HARD_TIMEOUTS.clear()

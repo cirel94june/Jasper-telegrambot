@@ -2014,7 +2014,7 @@ def _model_api_hard_timeout():
         value = float(raw_value)
     except (TypeError, ValueError):
         value = 20.0
-    return max(8.0, min(value, 60.0))
+    return max(8.0, min(30.0, value))
 
 
 def _recycle_current_worker(reason):
@@ -4377,7 +4377,7 @@ def webhook():
                 reply_to_message_id=msg.get("message_id"),
             )
             return "ok"
-        hard_timeout = os.environ.get("MODEL_API_HARD_TIMEOUT", "20")
+        hard_timeout = f"{_model_api_hard_timeout():g}"
         primary_models = ", ".join(CLAUDE_MODELS) or "未配置"
         backup_models = ", ".join(BACKUP_MODELS) or "未配置"
         send_telegram(
