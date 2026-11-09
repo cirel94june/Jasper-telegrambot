@@ -2847,7 +2847,7 @@ def _telegram_post_with_deadline(url, payload):
 
 
 def _home_sync_chat():
-    return home_sync.sync_chat(ALLOWED_IDS, PRIVATE_CHATS)
+    return home_sync.sync_chat(ALLOWED_IDS, PRIVATE_CHATS, PROACTIVE_CHAT_IDS)
 
 
 def send_telegram(chat_id, text, reply_to_message_id=None, reply_markup=None):
